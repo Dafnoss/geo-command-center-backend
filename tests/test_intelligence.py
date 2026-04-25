@@ -85,6 +85,13 @@ class IntelligenceTests(unittest.TestCase):
         self.assertIn("substitute/alternative", intents)
         self.assertEqual(len(cleaned["drafts"]), 25)
 
+    def test_validation_filters_weak_how_do_prompts(self):
+        payload = payload_with_25()
+        payload["drafts"][0]["query_text"] = "How do carbon nanotubes improve mechanical properties?"
+        cleaned = intelligence._validate_payload(payload, count=25, existing_norms=set())
+        texts = [d["query_text"] for d in cleaned["drafts"]]
+        self.assertNotIn("How do carbon nanotubes improve mechanical properties?", texts)
+
     def test_generation_creates_drafts_not_prompts(self):
         before = len(self.client.get("/prompts").json())
         original = intelligence._call_responses_api

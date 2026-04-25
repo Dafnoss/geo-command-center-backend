@@ -42,6 +42,9 @@ REQUIRED_INTENTS = [
 ]
 
 BRAND_TERMS = ("ocsial", "tuball", "tuball matrix")
+WEAK_SOURCE_DISCOVERY_PATTERNS = [
+    re.compile(r"\bhow\s+do(?:es)?\b.*\b(?:affect|enhance|improve)\b", re.IGNORECASE),
+]
 
 FALLBACK_QUERIES = [
     ("What is the best conductive additive for polymers?", "General additive discovery", "category education", 5, "Broad buyer question that reveals natural category sources."),
@@ -106,6 +109,10 @@ def normalize_query(text: str) -> str:
 def _is_branded_query(text: str) -> bool:
     norm = normalize_query(text)
     return any(term in norm for term in BRAND_TERMS)
+
+
+def _is_weak_source_discovery_query(text: str) -> bool:
+    return any(pattern.search(text or "") for pattern in WEAK_SOURCE_DISCOVERY_PATTERNS)
 
 
 def _setting(db: Session, key: str, default: str = "") -> str:
@@ -222,6 +229,8 @@ def _validate_payload(payload: dict, count: int, existing_norms: set[str]) -> di
         text = str(item.get("query_text") or "").strip()
         norm = normalize_query(text)
         if not text or not norm or norm in seen:
+            continue
+        if _is_weak_source_discovery_query(text):
             continue
         if _is_branded_query(text):
             if branded_count >= max_branded:
@@ -368,6 +377,7 @@ Use web research to understand:
 Return exactly {count} draft queries. They must be short natural-language prompts a buyer might ask ChatGPT/Perplexity/Google AI.
 Use mostly unbranded buyer behavior prompts. Do not mention {brand}, {product}, TUBALL MATRIX, or owned domains in query_text for this first source-discovery set.
 Avoid branded/product-promotional questions like "How do TUBALL nanotubes improve..." because they bias the source map.
+Also avoid generic educational phrasing like "How do carbon nanotubes enhance/improve..." unless it is a practical buyer "How to..." question.
 Good prompt style examples:
 {examples}
 
