@@ -12,6 +12,7 @@ import json
 import os
 import re
 import uuid
+from collections import Counter
 from datetime import datetime
 from typing import Iterable
 
@@ -244,18 +245,34 @@ def _validate_payload(payload: dict, count: int, existing_norms: set[str]) -> di
             break
 
     for text, cluster, intent, priority, reason in FALLBACK_QUERIES:
-        if len(clean_drafts) >= count:
+        present_intents = {d["intent_type"] for d in clean_drafts}
+        missing_intents = [required for required in REQUIRED_INTENTS if required not in present_intents]
+        if len(clean_drafts) >= count and not missing_intents:
             break
+        if len(clean_drafts) >= count and intent not in missing_intents:
+            continue
         norm = normalize_query(text)
         if norm in seen:
             continue
-        clean_drafts.append({
+        fallback_draft = {
             "query_text": text,
             "topic_cluster": cluster,
             "intent_type": intent,
             "business_priority": priority,
             "reason": reason,
-        })
+        }
+        if len(clean_drafts) < count:
+            clean_drafts.append(fallback_draft)
+        else:
+            counts = Counter(d["intent_type"] for d in clean_drafts)
+            replace_index = next(
+                (
+                    i for i in range(len(clean_drafts) - 1, -1, -1)
+                    if counts[clean_drafts[i]["intent_type"]] > 1
+                ),
+                len(clean_drafts) - 1,
+            )
+            clean_drafts[replace_index] = fallback_draft
         seen.add(norm)
 
     present_intents = {d["intent_type"] for d in clean_drafts}

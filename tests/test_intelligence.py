@@ -75,6 +75,16 @@ class IntelligenceTests(unittest.TestCase):
         self.assertTrue(all(d["business_priority"] >= 3 for d in cleaned["drafts"]))
         self.assertEqual(cleaned["drafts"][0]["query_text"], "What is the best conductive additive for polymers?")
 
+    def test_validation_repairs_missing_required_intent(self):
+        payload = payload_with_25()
+        for item in payload["drafts"]:
+            if item["intent_type"] == "substitute/alternative":
+                item["intent_type"] = "category education"
+        cleaned = intelligence._validate_payload(payload, count=25, existing_norms=set())
+        intents = {d["intent_type"] for d in cleaned["drafts"]}
+        self.assertIn("substitute/alternative", intents)
+        self.assertEqual(len(cleaned["drafts"]), 25)
+
     def test_generation_creates_drafts_not_prompts(self):
         before = len(self.client.get("/prompts").json())
         original = intelligence._call_responses_api
