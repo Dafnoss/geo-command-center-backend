@@ -19,6 +19,7 @@ from app.routers import (
     dashboard,
     settings as settings_router,
     monitor as monitor_router,
+    intelligence as intelligence_router,
 )
 
 
@@ -59,3 +60,4 @@ app.include_router(recommendations.router)
 app.include_router(tasks.router)
 app.include_router(settings_router.router)
 app.include_router(monitor_router.router)
+app.include_router(intelligence_router.router)

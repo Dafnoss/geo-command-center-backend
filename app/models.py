@@ -93,6 +93,33 @@ class Source(Base):
     updated: Mapped[str] = mapped_column(String, default="")  # human-friendly text for UI
 
 
+class MarketContext(Base):
+    __tablename__ = "market_context"
+
+    context_id: Mapped[str] = mapped_column(String, primary_key=True)
+    batch_id: Mapped[str] = mapped_column(String, index=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    brand_summary: Mapped[str] = mapped_column(Text, default="")
+    competitor_candidates: Mapped[list] = mapped_column(JSON, default=list)
+    application_areas: Mapped[list] = mapped_column(JSON, default=list)
+    source_citations: Mapped[list] = mapped_column(JSON, default=list)
+    raw_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class PromptDraft(Base):
+    __tablename__ = "prompt_drafts"
+
+    draft_id: Mapped[str] = mapped_column(String, primary_key=True)
+    batch_id: Mapped[str] = mapped_column(String, index=True)
+    query_text: Mapped[str] = mapped_column(Text)
+    topic_cluster: Mapped[str] = mapped_column(String, default="")
+    intent_type: Mapped[str] = mapped_column(String, default="")
+    business_priority: Mapped[int] = mapped_column(Integer, default=3)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String, default="draft")  # draft/imported/skipped
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class Url(Base):
     __tablename__ = "urls"
 

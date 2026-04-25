@@ -41,7 +41,7 @@ class PromptOut(ORMModel):
 
 
 class PromptCreate(BaseModel):
-    prompt_id: str
+    prompt_id: Optional[str] = None
     prompt_text: str
     topic_cluster: str = ""
     country: str = ""
@@ -209,6 +209,65 @@ class GenerateRequest(BaseModel):
     source_id: Optional[str] = None
     url_id: Optional[str] = None
     limit: int = 1  # how many recommendations to generate
+
+
+# ---------------- Market intelligence ----------------
+class CompetitorCandidate(BaseModel):
+    name: str
+    domain: str = ""
+    reason: str = ""
+
+
+class MarketContextOut(ORMModel):
+    context_id: str
+    batch_id: str
+    generated_at: datetime
+    brand_summary: str
+    competitor_candidates: List[dict]
+    application_areas: List[str]
+    source_citations: List[dict]
+    raw_payload: dict
+
+
+class PromptDraftOut(ORMModel):
+    draft_id: str
+    batch_id: str
+    query_text: str
+    topic_cluster: str
+    intent_type: str
+    business_priority: int
+    reason: str
+    status: str
+    created_at: datetime
+
+
+class DraftBatchOut(BaseModel):
+    batch_id: str
+    context: Optional[MarketContextOut]
+    drafts: List[PromptDraftOut]
+    competitor_candidates: List[CompetitorCandidate] = []
+
+
+class GenerateDraftsRequest(BaseModel):
+    count: int = 25
+
+
+class ApproveDraftsRequest(BaseModel):
+    draft_ids: List[str]
+
+
+class ApproveDraftsOut(BaseModel):
+    batch_id: str
+    imported: List[PromptOut]
+    skipped: List[str]
+
+
+class ApproveCompetitorsRequest(BaseModel):
+    competitors: List[CompetitorCandidate]
+
+
+class ApproveCompetitorsOut(BaseModel):
+    competitors: str
 
 
 # ---------------- Task ----------------

@@ -4,7 +4,6 @@ Prompt CRUD + filters.
 
 from __future__ import annotations
 
-import uuid
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -27,6 +26,17 @@ def _priority_label_from_business(n: int) -> str:
     if n >= 3:
         return "Medium"
     return "Low"
+
+
+def _next_prompt_id(db: Session) -> str:
+    ids = [r[0] for r in db.query(models.Prompt.prompt_id).filter(models.Prompt.prompt_id.like("P%")).all()]
+    nums = []
+    for pid in ids:
+        try:
+            nums.append(int(pid[1:]))
+        except (TypeError, ValueError):
+            continue
+    return "P" + str((max(nums) if nums else 0) + 1).zfill(3)
 
 
 @router.get("", response_model=List[schemas.PromptOut])
@@ -66,10 +76,11 @@ def get_prompt(prompt_id: str, db: Session = Depends(get_db)):
 
 @router.post("", response_model=schemas.PromptOut, status_code=201)
 def create_prompt(data: schemas.PromptCreate, db: Session = Depends(get_db)):
-    if db.query(models.Prompt).filter_by(prompt_id=data.prompt_id).first():
+    prompt_id = data.prompt_id or _next_prompt_id(db)
+    if db.query(models.Prompt).filter_by(prompt_id=prompt_id).first():
         raise HTTPException(409, "prompt_id already exists")
     row = models.Prompt(
-        prompt_id=data.prompt_id,
+        prompt_id=prompt_id,
         prompt_text=data.prompt_text,
         topic_cluster=data.topic_cluster,
         country=data.country,
