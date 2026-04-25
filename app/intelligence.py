@@ -313,6 +313,7 @@ Use web research to understand:
 Return exactly {count} draft queries. They must be short natural-language prompts a buyer might ask ChatGPT/Perplexity/Google AI.
 The set must include every intent type at least once:
 {", ".join(REQUIRED_INTENTS)}.
+Keep every reason under 18 words. Keep market_summary under 120 words. Return no more than 8 competitor candidates and no more than 8 source citations.
 
 Do not duplicate these existing live queries:
 {existing_text}
@@ -366,6 +367,7 @@ def _call_responses_api(db: Session, count: int) -> dict:
         "tools": [{"type": "web_search"}],
         "tool_choice": "auto",
         "include": ["web_search_call.action.sources"],
+        "max_output_tokens": 12000,
         "text": {
             "format": {
                 "type": "json_schema",
