@@ -18,6 +18,7 @@ from app.routers import (
     tasks,
     dashboard,
     settings as settings_router,
+    monitor as monitor_router,
 )
 
 
@@ -57,3 +58,4 @@ app.include_router(urls.router)
 app.include_router(recommendations.router)
 app.include_router(tasks.router)
 app.include_router(settings_router.router)
+app.include_router(monitor_router.router)

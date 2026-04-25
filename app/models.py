@@ -159,6 +159,18 @@ class Recommendation(Base):
     score_breakdown: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class UsageLog(Base):
+    __tablename__ = "usage_log"
+
+    log_id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    model: Mapped[str] = mapped_column(String, default="")
+    prompt_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
