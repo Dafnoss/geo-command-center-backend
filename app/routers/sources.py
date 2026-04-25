@@ -56,3 +56,12 @@ def update_source(source_id: str, data: schemas.SourceUpdate, db: Session = Depe
     db.commit()
     db.refresh(row)
     return row
+
+
+@router.delete("/{source_id}", status_code=204)
+def delete_source(source_id: str, db: Session = Depends(get_db)):
+    row = db.query(models.Source).filter_by(source_id=source_id).one_or_none()
+    if not row:
+        raise HTTPException(404, "Source not found")
+    db.delete(row)
+    db.commit()
