@@ -52,6 +52,29 @@ class IntelligenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             intelligence._validate_payload({"drafts": []}, count=25, existing_norms=set())
 
+    def test_validation_rejects_branded_repetitive_drafts_and_falls_back(self):
+        payload = {
+            "market_summary": "OCSiAl produces TUBALL graphene nanotubes for conductive materials.",
+            "applications": [],
+            "competitor_candidates": [],
+            "sources": [],
+            "drafts": [
+                {
+                    "query_text": f"How do TUBALL nanotubes improve conductivity in material {i}?",
+                    "topic_cluster": "Bad branded",
+                    "intent_type": "application/use-case",
+                    "business_priority": 1,
+                    "reason": "Too branded.",
+                }
+                for i in range(25)
+            ],
+        }
+        cleaned = intelligence._validate_payload(payload, count=25, existing_norms=set())
+        self.assertEqual(len(cleaned["drafts"]), 25)
+        self.assertTrue(all("tuball" not in d["query_text"].lower() for d in cleaned["drafts"]))
+        self.assertTrue(all(d["business_priority"] >= 3 for d in cleaned["drafts"]))
+        self.assertEqual(cleaned["drafts"][0]["query_text"], "What is the best conductive additive for polymers?")
+
     def test_generation_creates_drafts_not_prompts(self):
         before = len(self.client.get("/prompts").json())
         original = intelligence._call_responses_api

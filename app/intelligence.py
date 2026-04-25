@@ -40,32 +40,59 @@ REQUIRED_INTENTS = [
     "substitute/alternative",
 ]
 
+BRAND_TERMS = ("ocsial", "tuball", "tuball matrix")
+
 FALLBACK_QUERIES = [
-    ("What are graphene nanotubes?", "Category education", "category education", 4, "Core educational question for buyers learning the category."),
-    ("Graphene nanotubes vs carbon black", "Comparison", "comparison", 5, "High-intent comparison against the most common conductive filler."),
-    ("Single-wall carbon nanotubes vs multi-wall carbon nanotubes", "Comparison", "comparison", 4, "Clarifies where SWCNTs differ from MWCNT alternatives."),
-    ("Best conductive additive for epoxy", "Coatings and resins", "application/use-case", 5, "Epoxy is a practical application where additive choice matters."),
-    ("Best conductive additive for silicone", "Elastomers", "application/use-case", 4, "Silicone use cases map to TUBALL MATRIX positioning."),
-    ("Conductive additive for non-black plastics", "Thermoplastics", "application/use-case", 5, "Tests whether AI recognizes low-loading color-preserving additives."),
-    ("SWCNT for lithium-ion batteries", "Batteries", "application/use-case", 5, "Battery additives are a strategic TUBALL BATT use case."),
-    ("Graphene nanotubes for EV batteries", "Batteries", "application/use-case", 5, "Captures EV-battery discovery language."),
-    ("Are carbon nanotubes safe?", "Safety and regulation", "safety/regulatory", 5, "Safety questions often shape buyer confidence."),
-    ("REACH registered single-wall carbon nanotubes", "Safety and regulation", "safety/regulatory", 5, "Regulatory status is a differentiator for industrial buyers."),
-    ("Carbon black alternative for conductive polymers", "Substitutes", "substitute/alternative", 5, "Targets replacement demand for traditional fillers."),
-    ("Conductive additive for transparent coatings", "Coatings and resins", "application/use-case", 4, "Transparent coatings require low-loading conductive additives."),
-    ("Anti-static additive for rubber", "Elastomers", "application/use-case", 4, "Rubber antistatic use cases are commercially relevant."),
-    ("Conductive additive for SMC composites", "Composites", "application/use-case", 3, "SMC composites represent technical buyer searches."),
-    ("Best suppliers of single-wall carbon nanotubes", "Suppliers", "supplier/vendor", 5, "Supplier prompts expose vendor visibility and competitors."),
-    ("TUBALL vs carbon black", "Comparison", "comparison", 5, "Direct product-vs-substitute comparison."),
-    ("OCSiAl graphene nanotubes", "Brand and product", "category education", 5, "Direct brand/product discovery prompt."),
-    ("TUBALL conductive additive", "Brand and product", "category education", 5, "Direct product discovery prompt."),
-    ("How to reduce conductive filler loading", "Substitutes", "substitute/alternative", 4, "Targets a key benefit claim without naming the product."),
-    ("Conductive additive for cleanroom gloves", "Elastomers", "application/use-case", 3, "Specific industrial application for antistatic elastomers."),
-    ("Conductive additive for conveyor belts", "Elastomers", "application/use-case", 3, "Specific industrial rubber application."),
-    ("Conductive coatings for tanks", "Coatings and resins", "application/use-case", 3, "Industrial coating search with safety/performance intent."),
-    ("SWCNT for epoxy coatings", "Coatings and resins", "application/use-case", 4, "Specific SWCNT application prompt."),
-    ("Graphene nanotubes for tires", "Tires", "application/use-case", 4, "Tire and rubber applications are visible in market messaging."),
-    ("Graphene nanotube concentrate for plastics", "Thermoplastics", "application/use-case", 4, "Captures TUBALL MATRIX-style product language."),
+    ("What is the best conductive additive for polymers?", "General additive discovery", "category education", 5, "Broad buyer question that reveals natural category sources."),
+    ("What is the best anti-static additive for plastics?", "General additive discovery", "category education", 5, "Core anti-static search phrased like a real buyer."),
+    ("What is the best additive for ESD-safe polymer compounds?", "General additive discovery", "safety/regulatory", 5, "ESD-safe searches reveal trusted safety and compliance sources."),
+    ("What additive gives permanent anti-static properties in polymers?", "General additive discovery", "category education", 5, "Targets durable anti-static performance without naming a brand."),
+    ("What is the best additive agent for improving electrical conductivity in plastics?", "General additive discovery", "category education", 5, "Captures additive-agent language used by industrial buyers."),
+    ("Which conductive filler is best for polymer compounds?", "General additive discovery", "category education", 5, "Finds which filler categories LLMs recommend first."),
+    ("What are the most effective anti-static agents for industrial materials?", "General additive discovery", "category education", 4, "Broad industrial wording exposes non-brand citation sources."),
+    ("What additive should I use to make plastic electrically conductive?", "General additive discovery", "category education", 5, "Plain buyer wording matches practical discovery behavior."),
+    ("What additive should I use to reduce static electricity in polymers?", "General additive discovery", "category education", 5, "Tests anti-static recommendations without brand bias."),
+    ("What is the lowest-dosage conductive additive for plastics?", "Performance characteristics", "category education", 5, "Low loading is a key selection criterion."),
+    ("Carbon black vs carbon nanotubes for conductive plastics", "Comparison and selection", "comparison", 5, "High-intent comparison against the default conductive filler."),
+    ("Carbon black vs graphene for anti-static polymers", "Comparison and selection", "comparison", 5, "Reveals source preference for substitute technologies."),
+    ("Carbon nanotubes vs graphene nanoplatelets as conductive additives", "Comparison and selection", "comparison", 5, "Compares advanced additive categories buyers evaluate."),
+    ("Single wall carbon nanotubes vs multi wall carbon nanotubes as conductive additives", "Comparison and selection", "comparison", 5, "Separates SWCNT and MWCNT source visibility."),
+    ("Conductive carbon black vs carbon nanotube masterbatch", "Comparison and selection", "comparison", 5, "Matches practical compounder selection behavior."),
+    ("Best alternative to carbon black for anti-static plastics", "Comparison and selection", "substitute/alternative", 5, "Targets replacement demand for carbon black."),
+    ("Best alternative to carbon black for conductive elastomers", "Comparison and selection", "substitute/alternative", 5, "Elastomer buyers often compare against carbon black."),
+    ("Best alternative to metal fillers for conductive polymers", "Comparison and selection", "substitute/alternative", 4, "Finds lightweight and processable substitute recommendations."),
+    ("Which conductive additive preserves polymer color?", "Performance characteristics", "category education", 5, "Color retention is a major non-black additive driver."),
+    ("Which conductive additive has the least impact on mechanical properties?", "Performance characteristics", "category education", 5, "Mechanical retention is a high-value buyer concern."),
+    ("Top conductive additive suppliers for polymer compounds", "Supplier and market discovery", "supplier/vendor", 5, "Supplier prompts expose vendor and source visibility."),
+    ("Top anti-static additive suppliers for plastics", "Supplier and market discovery", "supplier/vendor", 5, "Finds which companies LLMs recommend naturally."),
+    ("Best carbon nanotube masterbatch suppliers", "Supplier and market discovery", "supplier/vendor", 5, "Targets CNT masterbatch supplier discovery."),
+    ("Best anti-static additive for silicone rubber", "Application-specific buyer prompts", "application/use-case", 4, "Silicone is a common anti-static elastomer application."),
+    ("Best conductive additive for TPU", "Application-specific buyer prompts", "application/use-case", 4, "TPU prompt captures thermoplastic elastomer demand."),
+    ("Best conductive additive for EPDM rubber", "Application-specific buyer prompts", "application/use-case", 4, "EPDM is a relevant conductive elastomer use case."),
+    ("Best conductive additive for FKM rubber", "Application-specific buyer prompts", "application/use-case", 4, "FKM adds chemical-resistant elastomer coverage."),
+    ("Best additive for conductive PA compounds", "Application-specific buyer prompts", "application/use-case", 4, "Polyamide compounds are common industrial plastics."),
+    ("Best additive for conductive polycarbonate", "Application-specific buyer prompts", "application/use-case", 4, "Polycarbonate adds engineering-plastic coverage."),
+    ("Best additive for conductive ABS", "Application-specific buyer prompts", "application/use-case", 4, "ABS captures another practical compounder search."),
+    ("Best additive for conductive epoxy resin", "Application-specific buyer prompts", "application/use-case", 4, "Epoxy resin is central for coatings and composites."),
+    ("Best conductive additive for polyurethane coatings", "Application-specific buyer prompts", "application/use-case", 4, "Coatings queries expose different citation sources."),
+    ("Best anti-static additive for industrial flooring", "Application-specific buyer prompts", "safety/regulatory", 4, "Flooring searches often involve ESD and safety requirements."),
+    ("How to improve conductivity in plastics without high filler loading?", "Performance characteristics", "category education", 5, "Low filler loading is a key purchasing driver."),
+    ("How to make colored plastic conductive?", "Performance characteristics", "category education", 5, "Plain-language color-retention query avoids brand bias."),
+    ("How to make transparent polymer films anti-static?", "Performance characteristics", "application/use-case", 4, "Transparent film prompts surface specialty additive sources."),
+    ("How to make elastomers conductive without losing elasticity?", "Performance characteristics", "application/use-case", 5, "Connects conductivity with mechanical-property preservation."),
+    ("How to improve ESD performance in coatings?", "Performance characteristics", "safety/regulatory", 4, "ESD coating searches reveal safety-oriented sources."),
+    ("How to make polymer composites conductive and lightweight?", "Performance characteristics", "application/use-case", 4, "Composite buyers often need lightweight conductivity."),
+    ("What conductive additive improves strength and conductivity?", "Performance characteristics", "category education", 4, "Finds additives positioned around dual performance benefits."),
+    ("What additive provides stable conductivity after processing?", "Performance characteristics", "category education", 4, "Processing stability is a practical buyer concern."),
+    ("What conductive additive works in low concentration?", "Performance characteristics", "category education", 5, "Low concentration is core to source-discovery value."),
+    ("What additive gives uniform conductivity in polymer compounds?", "Performance characteristics", "category education", 4, "Uniform dispersion and conductivity affect supplier choice."),
+    ("Top companies making conductive additives for elastomers", "Supplier and market discovery", "supplier/vendor", 4, "Supplier query focused on elastomer applications."),
+    ("Top companies making ESD additives for coatings", "Supplier and market discovery", "supplier/vendor", 4, "Captures supplier discovery in coatings."),
+    ("Best suppliers of single wall carbon nanotube additives", "Supplier and market discovery", "supplier/vendor", 5, "Direct SWCNT supplier discovery without naming OCSiAl."),
+    ("Best suppliers of graphene nanotube additives", "Supplier and market discovery", "supplier/vendor", 5, "Finds graphene nanotube supplier visibility."),
+    ("Best conductive additive products for industrial polymers", "Supplier and market discovery", "supplier/vendor", 5, "Product-level discovery across additive categories."),
+    ("Best additive agent for anti-static polymer applications", "Supplier and market discovery", "supplier/vendor", 4, "Uses additive-agent language from buyer behavior."),
+    ("Which companies are recommended for conductive polymer additives?", "Supplier and market discovery", "supplier/vendor", 5, "Directly surfaces recommended companies and cited sources."),
 ]
 
 
@@ -73,6 +100,11 @@ def normalize_query(text: str) -> str:
     """Normalize prompt text for duplicate detection."""
     cleaned = re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
     return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _is_branded_query(text: str) -> bool:
+    norm = normalize_query(text)
+    return any(term in norm for term in BRAND_TERMS)
 
 
 def _setting(db: Session, key: str, default: str = "") -> str:
@@ -181,6 +213,8 @@ def _validate_payload(payload: dict, count: int, existing_norms: set[str]) -> di
 
     clean_drafts = []
     seen = set(existing_norms)
+    branded_count = 0
+    max_branded = 0
     for item in drafts:
         if not isinstance(item, dict):
             continue
@@ -188,12 +222,16 @@ def _validate_payload(payload: dict, count: int, existing_norms: set[str]) -> di
         norm = normalize_query(text)
         if not text or not norm or norm in seen:
             continue
+        if _is_branded_query(text):
+            if branded_count >= max_branded:
+                continue
+            branded_count += 1
         intent = _coerce_intent(str(item.get("intent_type") or ""))
         try:
             priority = int(item.get("business_priority") or 3)
         except (TypeError, ValueError):
             priority = 3
-        priority = max(1, min(5, priority))
+        priority = max(3, min(5, priority))
         clean_drafts.append({
             "query_text": text[:300],
             "topic_cluster": str(item.get("topic_cluster") or "Uncategorized").strip()[:120],
@@ -204,9 +242,6 @@ def _validate_payload(payload: dict, count: int, existing_norms: set[str]) -> di
         seen.add(norm)
         if len(clean_drafts) >= count:
             break
-
-    if not clean_drafts:
-        raise ValueError("OpenAI payload contains no valid draft queries")
 
     for text, cluster, intent, priority, reason in FALLBACK_QUERIES:
         if len(clean_drafts) >= count:
@@ -295,8 +330,11 @@ def _build_research_prompt(db: Session, count: int) -> str:
     competitors = _setting(db, "competitors", "")
     existing = [row[0] for row in db.query(models.Prompt.prompt_text).all()]
     existing_text = "\n".join(f"- {x}" for x in existing[:100]) or "- none"
+    examples = "\n".join(f"- {text}" for text, *_ in FALLBACK_QUERIES[:20])
     return f"""
 Generate a reviewable GEO/AI-search prompt portfolio for an industrial materials company.
+
+PRIMARY GOAL: source discovery. The prompt set must reveal which sources LLMs rely on when a buyer searches for conductive, anti-static, or ESD additive agents.
 
 Brand: {brand}
 Product/product family: {product}
@@ -311,9 +349,16 @@ Use web research to understand:
 - supplier/vendor discovery queries.
 
 Return exactly {count} draft queries. They must be short natural-language prompts a buyer might ask ChatGPT/Perplexity/Google AI.
+Use mostly unbranded buyer behavior prompts. Do not mention {brand}, {product}, TUBALL MATRIX, or owned domains in query_text for this first source-discovery set.
+Avoid branded/product-promotional questions like "How do TUBALL nanotubes improve..." because they bias the source map.
+Good prompt style examples:
+{examples}
+
+Competitor frame: conductive and anti-static additive categories, not only nanotube manufacturers. Include category pressure from carbon black, conductive carbon black, multi-walled carbon nanotubes, graphene nanoplatelets, carbon fiber, CNT masterbatch, Cabot, Orion Engineered Carbons, Birla Carbon, Nouryon/Ketjenblack, Nanocyl, Arkema, CHASM Advanced Materials, Meijo Nano Carbon, Nano-C, Zeon Nano Technology, Thomas Swan, NanoIntegris/Raymor, and Cnano Technology.
 The set must include every intent type at least once:
 {", ".join(REQUIRED_INTENTS)}.
-Keep every reason under 18 words. Keep market_summary under 120 words. Return no more than 8 competitor candidates and no more than 8 source citations.
+Use business_priority 3-5 only. Prioritize broad discovery, comparison, supplier, and source-revealing prompts.
+Keep every reason under 18 words. Keep market_summary under 120 words. Return no more than 12 competitor candidates and no more than 8 source citations.
 
 Do not duplicate these existing live queries:
 {existing_text}
