@@ -1,0 +1,255 @@
+"""
+OpenAI-driven recommendation generator.
+
+Per spec §13:
+- Build a context block from a prompt / source / url
+- Ask the model to produce a structured JSON recommendation
+- Validate, score (priority + confidence), persist
+- Skip if a duplicate already exists for the same target
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from datetime import datetime
+from typing import List, Optional
+
+from sqlalchemy.orm import Session
+
+from app import models, schemas
+from app.config import settings as app_settings
+from app.scoring import recommendation_priority_score
+
+
+# ---------------- prompt template ----------------
+SYSTEM_PROMPT = """You are a Generative-Engine Optimization (GEO) consultant.
+Your job: given context about a brand, a search/AI prompt, an owned page, or a third-party
+source, return a single concrete, actionable recommendation that would improve the brand's
+visibility in AI-generated answers (ChatGPT, Perplexity, Google AI, Claude).
+
+Return ONLY valid JSON matching this schema:
+{
+  "title": string (one-line, action-oriented, < 90 chars),
+  "type": one of ["Create new page", "Update existing page", "Add FAQ section",
+                  "Add comparison table", "Add citations/sources", "Improve title/meta",
+                  "Fix indexing issue", "Create PR outreach brief", "Other"],
+  "diagnosis": string (1-3 sentences explaining WHY this matters),
+  "evidence": array of 3-6 short bullet strings (the facts that justify it),
+  "recommended_actions": array of 3-7 concrete steps,
+  "acceptance_criteria": array of 3-6 measurable checks,
+  "expected_impact": string (one sentence),
+  "scores": {
+    "business_priority": number 0..1,
+    "ai_visibility_gap": number 0..1,
+    "seo_opportunity": number 0..1,
+    "competitor_pressure": number 0..1,
+    "source_influence": number 0..1,
+    "conversion_potential": number 0..1,
+    "implementation_effort": number 0..1,
+    "dependency_risk": number 0..1
+  },
+  "confidence": number 0..100
+}
+Do not include any prose outside the JSON.
+"""
+
+
+def _build_context(db: Session, request: schemas.GenerateRequest) -> str:
+    """Build a textual context block for the model from the requested target."""
+    lines: List[str] = []
+
+    # Org context
+    target_brand = _setting(db, "target_brand", "OCSiAl")
+    target_product = _setting(db, "target_product", "TUBALL")
+    competitors = _setting(db, "competitors", "")
+    lines.append(f"Brand: {target_brand}")
+    lines.append(f"Product: {target_product}")
+    if competitors:
+        lines.append(f"Known competitors: {competitors}")
+    lines.append("")
+
+    if request.prompt_id:
+        p = db.query(models.Prompt).filter_by(prompt_id=request.prompt_id).one_or_none()
+        if p:
+            lines.append(f"Target prompt: \"{p.prompt_text}\"")
+            lines.append(f"Topic cluster: {p.topic_cluster}")
+            lines.append(f"Business priority: {p.business_priority}/5  (label: {p.priority})")
+            lines.append(f"Brand mentioned in AI answer: {p.brand_mentioned}")
+            lines.append(f"Product mentioned: {p.product_mentioned}")
+            lines.append(f"Owned domain cited: {p.domain_cited}")
+            lines.append(f"Competitors mentioned: {', '.join(p.competitors_mentioned) or 'none'}")
+            lines.append(f"Cited sources: {', '.join(p.cited_sources) or 'none'}")
+            lines.append(f"AI answer quality (1-5): {p.answer_quality_score}")
+            lines.append(f"Monitor status: {p.monitor_status}")
+            if p.target_url:
+                lines.append(f"Linked owned URL: {p.target_url}")
+            # latest AI result body
+            ar = (
+                db.query(models.AiResult)
+                .filter_by(prompt_id=p.prompt_id)
+                .order_by(models.AiResult.date_checked.desc())
+                .first()
+            )
+            if ar:
+                lines.append("")
+                lines.append("Latest AI answer (excerpt):")
+                lines.append(ar.answer_text[:1200])
+            lines.append("")
+
+    if request.source_id:
+        s = db.query(models.Source).filter_by(source_id=request.source_id).one_or_none()
+        if s:
+            lines.append(f"Target source: {s.title} ({s.source_url})")
+            lines.append(f"Source type: {s.source_type}")
+            lines.append(f"Influence score: {s.source_influence_score}/100")
+            lines.append(f"Cited by prompts: {', '.join(s.cited_by_prompts) or 'none'}")
+            lines.append(f"Mentions brand: {s.mentions_brand}, product: {s.mentions_product}, competitor: {s.mentions_competitor}")
+            lines.append(f"Outreach status: {s.outreach_status}")
+            lines.append(f"Last updated: {s.updated}")
+            lines.append("")
+
+    if request.url_id:
+        u = db.query(models.Url).filter_by(url_id=request.url_id).one_or_none()
+        if u:
+            lines.append(f"Target owned URL: {u.url}")
+            lines.append(f"Page type: {u.page_type}, cluster: {u.topic_cluster}")
+            lines.append(f"Indexable: {u.indexable}")
+            lines.append(f"Page readiness: {u.page_readiness_score}/100")
+            checks = {
+                "direct_answer": u.has_direct_answer,
+                "comparison_table": u.has_comparison_table,
+                "faq": u.has_faq,
+                "citations": u.has_citations,
+                "internal_links": u.has_internal_links,
+                "cta": u.has_cta,
+                "schema": u.has_schema,
+            }
+            lines.append(f"On-page checks: {checks}")
+            lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _setting(db: Session, key: str, default: str = "") -> str:
+    row = db.query(models.Setting).filter_by(setting_key=key).one_or_none()
+    return row.setting_value if row and row.setting_value else default
+
+
+def _has_duplicate(db: Session, request: schemas.GenerateRequest, title: str) -> bool:
+    q = db.query(models.Recommendation).filter(models.Recommendation.title == title)
+    if request.prompt_id:
+        q = q.filter(models.Recommendation.related_prompt_id == request.prompt_id)
+    if request.source_id:
+        q = q.filter(models.Recommendation.related_source_id == request.source_id)
+    if request.url_id:
+        q = q.filter(models.Recommendation.related_url == request.url_id)
+    return db.query(q.exists()).scalar()
+
+
+def _call_openai(context: str, n: int) -> list[dict]:
+    """Call OpenAI chat completions and return parsed JSON list."""
+    api_key = app_settings.openai_api_key or os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    # Lazy import so the rest of the app works without the openai SDK installed.
+    from openai import OpenAI  # type: ignore
+
+    client = OpenAI(api_key=api_key)
+
+    user_prompt = (
+        f"Generate {n} distinct GEO recommendation(s) for the following target. "
+        f"Return a JSON object with a key 'recommendations' that is a list of objects "
+        f"matching the schema in the system prompt.\n\n"
+        f"Context:\n{context}"
+    )
+
+    resp = client.chat.completions.create(
+        model=app_settings.openai_model,
+        temperature=0.4,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    content = resp.choices[0].message.content or "{}"
+    parsed = json.loads(content)
+    items = parsed.get("recommendations") or []
+    if not isinstance(items, list):
+        items = [items]
+    return items
+
+
+def _persist(db: Session, request: schemas.GenerateRequest, item: dict) -> Optional[models.Recommendation]:
+    title = (item.get("title") or "").strip()
+    if not title:
+        return None
+    if _has_duplicate(db, request, title):
+        return None
+
+    scores = item.get("scores") or {}
+    priority_score = recommendation_priority_score(
+        business_priority=float(scores.get("business_priority", 0.5)),
+        ai_visibility_gap=float(scores.get("ai_visibility_gap", 0.5)),
+        seo_opportunity=float(scores.get("seo_opportunity", 0.5)),
+        competitor_pressure=float(scores.get("competitor_pressure", 0.5)),
+        source_influence=float(scores.get("source_influence", 0.5)),
+        conversion_potential=float(scores.get("conversion_potential", 0.5)),
+        implementation_effort=float(scores.get("implementation_effort", 0.5)),
+        dependency_risk=float(scores.get("dependency_risk", 0.5)),
+    )
+
+    row = models.Recommendation(
+        recommendation_id=f"R-{uuid.uuid4().hex[:8].upper()}",
+        title=title[:200],
+        type=item.get("type") or "Other",
+        diagnosis=item.get("diagnosis") or "",
+        evidence=list(item.get("evidence") or []),
+        recommended_actions=list(item.get("recommended_actions") or []),
+        acceptance_criteria=list(item.get("acceptance_criteria") or []),
+        related_prompt_id=request.prompt_id,
+        related_url=request.url_id,
+        related_source_id=request.source_id,
+        priority_score=priority_score,
+        confidence_score=int(item.get("confidence") or 50),
+        expected_impact=item.get("expected_impact") or "",
+        status="New",
+        created_at=datetime.utcnow(),
+        score_breakdown={
+            k: int(float(v) * 100) for k, v in scores.items()
+            if isinstance(v, (int, float))
+        },
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def generate_recommendations(*, db: Session, request: schemas.GenerateRequest) -> list[models.Recommendation]:
+    """Top-level entry called by the router."""
+    if not (request.prompt_id or request.source_id or request.url_id):
+        # If no target supplied, pick the worst-performing high-priority prompt.
+        p = (
+            db.query(models.Prompt)
+            .filter(models.Prompt.monitor_status.in_(["Gap", "Risk"]))
+            .order_by(models.Prompt.business_priority.desc())
+            .first()
+        )
+        if p:
+            request = schemas.GenerateRequest(prompt_id=p.prompt_id, limit=request.limit)
+
+    context = _build_context(db, request)
+    items = _call_openai(context, n=max(1, request.limit))
+
+    saved: list[models.Recommendation] = []
+    for it in items:
+        row = _persist(db, request, it)
+        if row:
+            saved.append(row)
+    db.commit()
+    for r in saved:
+        db.refresh(r)
+    return saved
