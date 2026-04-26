@@ -19,7 +19,7 @@ SETTINGS = [
     {"setting_key": "target_product",       "setting_value": "TUBALL",                                                                "notes": "Primary product name."},
     {"setting_key": "owned_domains",        "setting_value": "ocsial.com,tuball.com",                                                 "notes": "Comma-separated domains treated as 'owned' citations."},
     {"setting_key": "competitors",          "setting_value": "Cabot,Orion,Imerys,LG Chem,Cnano,Nanocyl,Arkema,Showa Denko",          "notes": "Comma-separated competitor list."},
-    {"setting_key": "openai_model",         "setting_value": "gpt-4o-mini",                                                            "notes": "OpenAI model used for monitoring + recommendations."},
+    {"setting_key": "openai_model",         "setting_value": "gpt-4.1",                                                                 "notes": "OpenAI model used for monitoring + recommendations."},
     {"setting_key": "research_model",       "setting_value": "gpt-4.1-mini",                                                           "notes": "OpenAI model used for market research and query generation."},
     {"setting_key": "automation_mode",      "setting_value": "off",                                                                    "notes": "off | manual | weekly"},
     {"setting_key": "monthly_cost_cap_usd", "setting_value": "20",                                                                     "notes": "Soft cap on OpenAI spend per month."},

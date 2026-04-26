@@ -159,7 +159,7 @@ def _has_duplicate(db: Session, request: schemas.GenerateRequest, title: str) ->
     return db.query(q.exists()).scalar()
 
 
-def _call_openai(context: str, n: int) -> list[dict]:
+def _call_openai(context: str, n: int, model: str) -> list[dict]:
     """Call OpenAI chat completions and return parsed JSON list."""
     api_key = app_settings.openai_api_key or os.getenv("OPENAI_API_KEY", "")
     if not api_key:
@@ -178,7 +178,7 @@ def _call_openai(context: str, n: int) -> list[dict]:
     )
 
     resp = client.chat.completions.create(
-        model=app_settings.openai_model,
+        model=model,
         temperature=0.4,
         response_format={"type": "json_object"},
         messages=[
@@ -253,7 +253,8 @@ def generate_recommendations(*, db: Session, request: schemas.GenerateRequest) -
             request = schemas.GenerateRequest(prompt_id=p.prompt_id, limit=request.limit)
 
     context = _build_context(db, request)
-    items = _call_openai(context, n=max(1, request.limit))
+    model = _setting(db, "openai_model", app_settings.openai_model or "gpt-4.1")
+    items = _call_openai(context, n=max(1, request.limit), model=model)
 
     saved: list[models.Recommendation] = []
     for it in items:

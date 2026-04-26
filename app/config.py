@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     openai_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-4.1"
     database_url: str = "sqlite:///./data/geo.db"
     # When DATABASE_URL points at Turso (sqlite+libsql://...) supply the auth token here.
     turso_auth_token: str = ""
