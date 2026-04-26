@@ -15,6 +15,7 @@ from sqlalchemy import func, extract
 from app import models
 from app.database import get_db
 from app import monitor as monitor_engine
+from app.visibility import derive_monitor_status
 
 
 router = APIRouter(prefix="/monitor", tags=["monitor"])
@@ -63,6 +64,52 @@ def run_one(prompt_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "prompt not found")
     res = monitor_engine.run_query(db, p)
     return res
+
+
+@router.post("/recompute-statuses")
+def recompute_statuses(db: Session = Depends(get_db)):
+    """Recompute stored prompt statuses from current evidence fields.
+
+    Useful after visibility-rule changes because imported/unrun prompts stay
+    Unchecked, OCSiAl or TUBALL visibility becomes Good, competitor-only
+    evidence becomes Risk, and weak run evidence becomes Gap.
+    """
+    changed = 0
+    retired_recommendations = 0
+    counts = {"Unchecked": 0, "Good": 0, "Risk": 0, "Gap": 0}
+    prompts = db.query(models.Prompt).all()
+    for prompt in prompts:
+        if prompt.monitor_status == "Unchecked" and not (
+            prompt.brand_mentioned
+            or prompt.product_mentioned
+            or prompt.domain_cited
+            or prompt.competitors_mentioned
+            or prompt.cited_sources
+            or prompt.answer_quality_score
+        ):
+            new_status = "Unchecked"
+        else:
+            new_status = derive_monitor_status(
+                visible=bool(prompt.brand_mentioned or prompt.product_mentioned),
+                competitors=list(prompt.competitors_mentioned or []),
+            )
+        counts[new_status] = counts.get(new_status, 0) + 1
+        if prompt.monitor_status != new_status:
+            prompt.monitor_status = new_status
+            changed += 1
+        if new_status == "Good":
+            for rec in db.query(models.Recommendation).filter(
+                models.Recommendation.related_prompt_id == prompt.prompt_id,
+                models.Recommendation.status == "New",
+            ).all():
+                rec.status = "Rejected"
+                retired_recommendations += 1
+    db.commit()
+    return {
+        "changed": changed,
+        "retired_recommendations": retired_recommendations,
+        "counts": counts,
+    }
 
 
 @router.get("/status")
