@@ -333,7 +333,11 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
 
         if risks and competitors:
             rec_type = "Add comparison table"
-            title = f"Build {cluster} comparison content against cited competitors"
+            title = (
+                "Strengthen comparison content against cited competitors"
+                if cluster.strip().lower() == "comparison"
+                else f"Add {cluster} competitor comparison content"
+            )
         elif citation_rate == 0:
             rec_type = "Add citations/sources"
             title = f"Make OCSiAl/TUBALL citable for {cluster}"
