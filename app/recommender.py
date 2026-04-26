@@ -287,6 +287,10 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
     rejected_stale = 0
     for rec in db.query(models.Recommendation).filter(models.Recommendation.status == "New").all():
         meta = rec.score_breakdown or {}
+        if rec.related_prompt_id and meta.get("source") != "prompt_evidence":
+            rec.status = "Rejected"
+            rejected_stale += 1
+            continue
         if meta.get("source") != "prompt_evidence":
             continue
         if meta.get("scope") == "cluster" and meta.get("cluster") not in active_clusters:
