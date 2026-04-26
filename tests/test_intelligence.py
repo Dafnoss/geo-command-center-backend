@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import uuid
 
 
 os.environ["DATABASE_URL"] = "sqlite:///" + tempfile.mktemp(prefix="geocc-intel-", suffix=".db")
@@ -115,6 +116,50 @@ class IntelligenceTests(unittest.TestCase):
         self.assertIn("run_coverage", data)
         self.assertGreaterEqual(data["imported_prompts"]["value"], 1)
         self.assertLess(data["run_coverage"]["value"], 100)
+
+    def test_recommendation_processor_uses_gap_risk_only(self):
+        suffix = uuid.uuid4().hex[:8]
+        unchecked_id = f"PUN-{suffix}"
+        risk_id = f"PRS-{suffix}"
+        gap_id = f"PGP-{suffix}"
+        for prompt_id, text in [
+            (unchecked_id, "Unchecked processor prompt"),
+            (risk_id, "Conductive additive suppliers for plastics"),
+            (gap_id, "Best antistatic additive for elastomers"),
+        ]:
+            res = self.client.post("/prompts", json={
+                "prompt_id": prompt_id,
+                "prompt_text": text,
+                "topic_cluster": "Processor Test",
+                "business_priority": 5,
+            })
+            self.assertIn(res.status_code, (201, 409), res.text)
+
+        self.client.post("/ai-results", json={
+            "prompt_id": risk_id,
+            "answer_text": "Cabot and Orion are common conductive additive suppliers.",
+            "competitors_mentioned": ["Cabot", "Orion"],
+            "answer_quality_score": 3,
+        })
+        self.client.post("/ai-results", json={
+            "prompt_id": gap_id,
+            "answer_text": "Several additive chemistries can reduce static in elastomers.",
+            "answer_quality_score": 3,
+        })
+
+        res = self.client.post("/recommendations/process-prompts")
+        self.assertEqual(res.status_code, 200, res.text)
+        data = res.json()
+        self.assertGreaterEqual(data["considered_prompts"], 2)
+        rec = next((r for r in data["recommendations"] if r["score_breakdown"].get("cluster") == "Processor Test"), None)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["score_breakdown"]["scope"], "cluster")
+        self.assertEqual(rec["score_breakdown"]["source"], "prompt_evidence")
+        self.assertEqual(rec["score_breakdown"]["prompt_count"], 2)
+
+        summary = self.client.get("/recommendations/summary")
+        self.assertEqual(summary.status_code, 200, summary.text)
+        self.assertIn("cluster_level", summary.json())
 
     def test_validation_rejects_branded_repetitive_drafts_and_falls_back(self):
         payload = {

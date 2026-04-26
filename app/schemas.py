@@ -211,6 +211,26 @@ class GenerateRequest(BaseModel):
     limit: int = 1  # how many recommendations to generate
 
 
+class RecommendationSummaryOut(BaseModel):
+    total_active: int
+    high_priority: int
+    gap_driven: int
+    risk_driven: int
+    cluster_level: int
+    prompt_level: int
+    approved_or_done: int
+    rejected: int
+
+
+class RecommendationProcessOut(BaseModel):
+    considered_prompts: int
+    clusters_processed: int
+    created: int
+    updated: int
+    rejected_stale: int
+    recommendations: List[RecommendationOut]
+
+
 # ---------------- Market intelligence ----------------
 class CompetitorCandidate(BaseModel):
     name: str

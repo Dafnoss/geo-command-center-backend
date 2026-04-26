@@ -14,6 +14,7 @@ import json
 import os
 import uuid
 from datetime import datetime
+from collections import Counter, defaultdict
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
@@ -263,3 +264,173 @@ def generate_recommendations(*, db: Session, request: schemas.GenerateRequest) -
     for r in saved:
         db.refresh(r)
     return saved
+
+
+def process_prompt_evidence_recommendations(db: Session) -> dict:
+    """Create consolidated recommendations from all monitored prompt evidence.
+
+    This is the strategic recommendation engine for the MVP. It deliberately uses
+    prompt evidence only, keeps history by rejecting stale rows instead of
+    deleting, and prefers cluster-level actions over one recommendation per prompt.
+    """
+    run_prompts = (
+        db.query(models.Prompt)
+        .filter(models.Prompt.monitor_status.in_(("Gap", "Risk")))
+        .all()
+    )
+
+    groups: dict[str, list[models.Prompt]] = defaultdict(list)
+    for prompt in run_prompts:
+        groups[prompt.topic_cluster or "Uncategorized"].append(prompt)
+
+    active_clusters = set(groups.keys())
+    rejected_stale = 0
+    for rec in db.query(models.Recommendation).filter(models.Recommendation.status == "New").all():
+        meta = rec.score_breakdown or {}
+        if meta.get("source") != "prompt_evidence":
+            continue
+        if meta.get("scope") == "cluster" and meta.get("cluster") not in active_clusters:
+            rec.status = "Rejected"
+            rejected_stale += 1
+        if rec.related_prompt_id:
+            prompt = db.query(models.Prompt).filter_by(prompt_id=rec.related_prompt_id).one_or_none()
+            if not prompt or prompt.monitor_status == "Good":
+                rec.status = "Rejected"
+                rejected_stale += 1
+
+    created = 0
+    updated = 0
+    output: list[models.Recommendation] = []
+
+    sorted_groups = sorted(
+        groups.items(),
+        key=lambda item: (
+            sum(1 for p in item[1] if p.monitor_status == "Gap"),
+            sum(1 for p in item[1] if p.monitor_status == "Risk"),
+            sum(p.business_priority for p in item[1]),
+        ),
+        reverse=True,
+    )
+
+    for cluster, prompts in sorted_groups[:10]:
+        total = len(prompts)
+        gaps = [p for p in prompts if p.monitor_status == "Gap"]
+        risks = [p for p in prompts if p.monitor_status == "Risk"]
+        cited = [p for p in prompts if p.domain_cited]
+        visible = [p for p in prompts if p.brand_mentioned or p.product_mentioned]
+        top_prompt = sorted(prompts, key=lambda p: (p.business_priority, p.answer_quality_score), reverse=True)[0]
+        competitors = Counter(c for p in prompts for c in (p.competitors_mentioned or []))
+        sources = Counter(s for p in prompts for s in (p.cited_sources or []))
+
+        visibility_rate = round(len(visible) / total * 100) if total else 0
+        citation_rate = round(len(cited) / total * 100) if total else 0
+        competitor_rate = round(len(risks) / total * 100) if total else 0
+        priority_score = min(95, 45 + len(gaps) * 6 + len(risks) * 4 + max(p.business_priority for p in prompts) * 5)
+
+        if risks and competitors:
+            rec_type = "Add comparison table"
+            title = f"Build {cluster} comparison content against cited competitors"
+        elif citation_rate == 0:
+            rec_type = "Add citations/sources"
+            title = f"Make OCSiAl/TUBALL citable for {cluster}"
+        else:
+            rec_type = "Create new page"
+            title = f"Create an OCSiAl/TUBALL answer hub for {cluster}"
+
+        evidence = [
+            f"{total} run prompts in this cluster are still Gap/Risk.",
+            f"{len(gaps)} Gap prompts do not mention OCSiAl/TUBALL.",
+            f"{len(risks)} Risk prompts mention competitors without enough OCSiAl/TUBALL visibility.",
+            f"Owned domains are cited in {citation_rate}% of these prompts.",
+        ]
+        if competitors:
+            evidence.append("Top competitors appearing: " + ", ".join(c for c, _ in competitors.most_common(4)) + ".")
+        if sources:
+            evidence.append("LLM-cited sources include: " + ", ".join(s for s, _ in sources.most_common(4)) + ".")
+
+        actions = [
+            f"Create or update one authoritative {cluster} page that directly answers the highest-priority prompts.",
+            "Name OCSiAl and TUBALL early, then explain why graphene nanotubes/SWCNT matter for the use case.",
+            "Add a concise comparison section against the most-cited substitutes and competitors.",
+            "Add quotable technical claims, application examples, and source-style references that LLMs can reuse.",
+            "Link the page from relevant OCSiAl/TUBALL pages and rerun this cluster after publishing.",
+        ]
+        acceptance = [
+            "Page directly answers at least five monitored prompts from this cluster.",
+            "Includes OCSiAl, TUBALL, owned-domain references, and comparison language.",
+            "After rerun, at least one prompt in the cluster moves from Gap/Risk to Good.",
+        ]
+        meta = {
+            "source": "prompt_evidence",
+            "scope": "cluster",
+            "cluster": cluster,
+            "prompt_count": total,
+            "gap_count": len(gaps),
+            "risk_count": len(risks),
+            "owned_citation_rate": citation_rate,
+            "visibility_rate": visibility_rate,
+            "competitor_rate": competitor_rate,
+        }
+
+        existing = None
+        for rec in db.query(models.Recommendation).filter(models.Recommendation.status == "New").all():
+            rec_meta = rec.score_breakdown or {}
+            if rec_meta.get("source") == "prompt_evidence" and rec_meta.get("scope") == "cluster" and rec_meta.get("cluster") == cluster:
+                existing = rec
+                break
+
+        if existing:
+            row = existing
+            row.title = title[:200]
+            row.type = rec_type
+            row.diagnosis = (
+                f"{cluster} is underperforming in monitored AI answers: visibility is {visibility_rate}% "
+                f"and owned citation rate is {citation_rate}%. This is a strategic content/source gap, not just one bad prompt."
+            )
+            row.evidence = evidence[:6]
+            row.recommended_actions = actions
+            row.acceptance_criteria = acceptance
+            row.related_prompt_id = top_prompt.prompt_id
+            row.priority_score = priority_score
+            row.confidence_score = 80 if total >= 3 else 65
+            row.expected_impact = f"Improve OCSiAl/TUBALL visibility across {total} related monitored prompts."
+            row.score_breakdown = meta
+            updated += 1
+        else:
+            row = models.Recommendation(
+                recommendation_id=f"R-{uuid.uuid4().hex[:8].upper()}",
+                title=title[:200],
+                type=rec_type,
+                diagnosis=(
+                    f"{cluster} is underperforming in monitored AI answers: visibility is {visibility_rate}% "
+                    f"and owned citation rate is {citation_rate}%. This is a strategic content/source gap, not just one bad prompt."
+                ),
+                evidence=evidence[:6],
+                recommended_actions=actions,
+                acceptance_criteria=acceptance,
+                related_prompt_id=top_prompt.prompt_id,
+                related_url=None,
+                related_source_id=None,
+                priority_score=priority_score,
+                confidence_score=80 if total >= 3 else 65,
+                expected_impact=f"Improve OCSiAl/TUBALL visibility across {total} related monitored prompts.",
+                status="New",
+                created_at=datetime.utcnow(),
+                score_breakdown=meta,
+            )
+            db.add(row)
+            created += 1
+        output.append(row)
+
+    db.commit()
+    for rec in output:
+        db.refresh(rec)
+
+    return {
+        "considered_prompts": len(run_prompts),
+        "clusters_processed": len(sorted_groups[:10]),
+        "created": created,
+        "updated": updated,
+        "rejected_stale": rejected_stale,
+        "recommendations": output,
+    }

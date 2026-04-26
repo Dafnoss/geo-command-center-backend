@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.database import get_db
-from app.recommender import generate_recommendations
+from app.recommender import generate_recommendations, process_prompt_evidence_recommendations
 
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
@@ -50,6 +50,28 @@ def list_recommendations(
                 continue
         active.append(row)
     return active
+
+
+@router.get("/summary", response_model=schemas.RecommendationSummaryOut)
+def recommendation_summary(db: Session = Depends(get_db)):
+    rows = db.query(models.Recommendation).all()
+    active = [r for r in rows if r.status not in ("Rejected", "Approved", "Task created")]
+    return schemas.RecommendationSummaryOut(
+        total_active=len(active),
+        high_priority=sum(1 for r in active if r.priority_score >= 80),
+        gap_driven=sum(1 for r in active if (r.score_breakdown or {}).get("gap_count", 0) > 0),
+        risk_driven=sum(1 for r in active if (r.score_breakdown or {}).get("risk_count", 0) > 0),
+        cluster_level=sum(1 for r in active if (r.score_breakdown or {}).get("scope") == "cluster"),
+        prompt_level=sum(1 for r in active if (r.score_breakdown or {}).get("scope") != "cluster"),
+        approved_or_done=sum(1 for r in rows if r.status in ("Approved", "Task created")),
+        rejected=sum(1 for r in rows if r.status == "Rejected"),
+    )
+
+
+@router.post("/process-prompts", response_model=schemas.RecommendationProcessOut)
+def process_prompts(db: Session = Depends(get_db)):
+    result = process_prompt_evidence_recommendations(db)
+    return schemas.RecommendationProcessOut(**result)
 
 
 @router.post("/cleanup-stale")
