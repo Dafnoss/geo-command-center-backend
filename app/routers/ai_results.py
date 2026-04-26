@@ -73,7 +73,11 @@ def create_result(data: schemas.AiResultCreate, db: Session = Depends(get_db)):
     prompt.cited_sources = list(data.cited_sources)
     prompt.answer_quality_score = data.answer_quality_score
 
-    prompt.monitor_status = derive_monitor_status(visible=visible, competitors=list(data.competitors_mentioned))
+    prompt.monitor_status = derive_monitor_status(
+        visible=visible,
+        competitors=list(data.competitors_mentioned),
+        domain_cited=data.domain_cited,
+    )
 
     if prompt.monitor_status == "Good":
         for rec in db.query(models.Recommendation).filter(

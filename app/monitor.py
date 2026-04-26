@@ -192,7 +192,7 @@ def run_query(db: Session, prompt: models.Prompt) -> dict:
     prompt.competitors_mentioned = comps
     prompt.cited_sources     = [_domain_of(u) for u in urls if _domain_of(u)]
     prompt.answer_quality_score = quality
-    prompt.monitor_status = derive_monitor_status(visible=visible_in, competitors=comps)
+    prompt.monitor_status = derive_monitor_status(visible=visible_in, competitors=comps, domain_cited=domain_cited)
 
     # Upsert Sources from the cited URLs
     for u in urls:

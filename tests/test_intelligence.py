@@ -57,6 +57,8 @@ class IntelligenceTests(unittest.TestCase):
     def test_visibility_status_rules(self):
         self.assertEqual(derive_monitor_status(visible=True, competitors=[]), "Good")
         self.assertEqual(derive_monitor_status(visible=True, competitors=["Cabot"]), "Good")
+        self.assertEqual(derive_monitor_status(visible=False, competitors=[], domain_cited=True), "Good")
+        self.assertEqual(derive_monitor_status(visible=False, competitors=["Cabot"], domain_cited=True), "Good")
         self.assertEqual(derive_monitor_status(visible=False, competitors=["Cabot"]), "Risk")
         self.assertEqual(derive_monitor_status(visible=False, competitors=[]), "Gap")
 
@@ -80,6 +82,28 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(res.status_code, 201, res.text)
         updated = self.client.get("/prompts/PTUBALL").json()
         self.assertTrue(updated["product_mentioned"])
+        self.assertEqual(updated["monitor_status"], "Good")
+
+    def test_manual_ai_result_owned_source_only_counts_good(self):
+        prompt = self.client.post("/prompts", json={
+            "prompt_id": "PSOURCE",
+            "prompt_text": "Best conductive additive sources",
+            "topic_cluster": "Test",
+        })
+        self.assertIn(prompt.status_code, (201, 409), prompt.text)
+        res = self.client.post("/ai-results", json={
+            "prompt_id": "PSOURCE",
+            "answer_text": "This answer cites a relevant owned source without naming the brand.",
+            "brand_mentioned": False,
+            "product_mentioned": False,
+            "domain_cited": True,
+            "competitors_mentioned": ["Cabot"],
+            "cited_sources": ["https://tuball.com/articles/conductive-additives"],
+            "answer_quality_score": 3,
+        })
+        self.assertEqual(res.status_code, 201, res.text)
+        updated = self.client.get("/prompts/PSOURCE").json()
+        self.assertTrue(updated["domain_cited"])
         self.assertEqual(updated["monitor_status"], "Good")
 
     def test_manual_ai_result_competitor_only_counts_risk(self):

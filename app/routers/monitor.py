@@ -92,6 +92,7 @@ def recompute_statuses(db: Session = Depends(get_db)):
             new_status = derive_monitor_status(
                 visible=bool(prompt.brand_mentioned or prompt.product_mentioned),
                 competitors=list(prompt.competitors_mentioned or []),
+                domain_cited=bool(prompt.domain_cited),
             )
         counts[new_status] = counts.get(new_status, 0) + 1
         if prompt.monitor_status != new_status:

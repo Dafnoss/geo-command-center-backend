@@ -1,8 +1,8 @@
 """
 Shared monitoring visibility rules.
 
-For this MVP, OCSiAl and TUBALL are equivalent success entities: if an AI
-answer mentions either one, the monitored prompt has brand visibility.
+For this MVP, OCSiAl and TUBALL are equivalent success entities. A prompt is
+covered if the AI answer mentions either entity OR cites an owned domain.
 """
 
 from __future__ import annotations
@@ -57,8 +57,8 @@ def domain_matches_owned(domain: str, owned_domains: list[str]) -> bool:
     return any(d == od or d.endswith("." + od) for od in owned if od)
 
 
-def derive_monitor_status(*, visible: bool, competitors: list[str] | None) -> str:
-    if visible:
+def derive_monitor_status(*, visible: bool, competitors: list[str] | None, domain_cited: bool = False) -> str:
+    if visible or domain_cited:
         return "Good"
     if competitors:
         return "Risk"
@@ -78,4 +78,8 @@ def is_run_prompt(prompt) -> bool:
 
 
 def is_visible_prompt(prompt) -> bool:
-    return bool(getattr(prompt, "brand_mentioned", False) or getattr(prompt, "product_mentioned", False))
+    return bool(
+        getattr(prompt, "brand_mentioned", False)
+        or getattr(prompt, "product_mentioned", False)
+        or getattr(prompt, "domain_cited", False)
+    )
