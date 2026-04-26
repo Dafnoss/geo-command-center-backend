@@ -29,6 +29,11 @@ Your job: given context about a brand, a search/AI prompt, an owned page, or a t
 source, return a single concrete, actionable recommendation that would improve the brand's
 visibility in AI-generated answers (ChatGPT, Perplexity, Google AI, Claude).
 
+OCSiAl and TUBALL are equivalent success entities: if an AI answer mentions either one,
+the brand has visibility. Owned-domain citations are a stronger win but are tracked
+separately. Prefer practical content/source actions: pages to create or improve,
+comparison/FAQ sections to add, claims to substantiate, and third-party sources to target.
+
 Return ONLY valid JSON matching this schema:
 {
   "title": string (one-line, action-oriented, < 90 chars),
@@ -76,13 +81,18 @@ def _build_context(db: Session, request: schemas.GenerateRequest) -> str:
             lines.append(f"Target prompt: \"{p.prompt_text}\"")
             lines.append(f"Topic cluster: {p.topic_cluster}")
             lines.append(f"Business priority: {p.business_priority}/5  (label: {p.priority})")
-            lines.append(f"Brand mentioned in AI answer: {p.brand_mentioned}")
-            lines.append(f"Product mentioned: {p.product_mentioned}")
+            lines.append(f"OCSiAl/TUBALL mentioned in AI answer: {p.brand_mentioned or p.product_mentioned}")
+            lines.append(f"OCSiAl mentioned: {p.brand_mentioned}")
+            lines.append(f"TUBALL mentioned: {p.product_mentioned}")
             lines.append(f"Owned domain cited: {p.domain_cited}")
             lines.append(f"Competitors mentioned: {', '.join(p.competitors_mentioned) or 'none'}")
             lines.append(f"Cited sources: {', '.join(p.cited_sources) or 'none'}")
             lines.append(f"AI answer quality (1-5): {p.answer_quality_score}")
             lines.append(f"Monitor status: {p.monitor_status}")
+            if not (p.brand_mentioned or p.product_mentioned):
+                lines.append("Visibility gap: the answer did not mention OCSiAl or TUBALL.")
+            if not p.domain_cited:
+                lines.append("Citation gap: no owned OCSiAl/TUBALL domain was cited.")
             if p.target_url:
                 lines.append(f"Linked owned URL: {p.target_url}")
             # latest AI result body

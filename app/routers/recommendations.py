@@ -39,7 +39,56 @@ def list_recommendations(
         q = q.filter(models.Recommendation.related_url == related_url)
     if related_source_id:
         q = q.filter(models.Recommendation.related_source_id == related_source_id)
-    return q.order_by(models.Recommendation.priority_score.desc()).all()
+    rows = q.order_by(models.Recommendation.priority_score.desc()).all()
+    active = []
+    for row in rows:
+        if row.status == "Rejected" and not status:
+            continue
+        if row.related_prompt_id:
+            prompt = db.query(models.Prompt).filter_by(prompt_id=row.related_prompt_id).one_or_none()
+            if prompt and prompt.monitor_status == "Good" and not status:
+                continue
+        active.append(row)
+    return active
+
+
+@router.post("/cleanup-stale")
+def cleanup_stale_recommendations(db: Session = Depends(get_db)):
+    """
+    Non-destructive maintenance: stale/duplicate active recommendations are marked
+    Rejected instead of deleted, so evidence history is preserved.
+    """
+    rejected_good = 0
+    rejected_duplicates = 0
+    active_by_prompt: dict[str, list[models.Recommendation]] = {}
+
+    rows = (
+        db.query(models.Recommendation)
+        .filter(models.Recommendation.status == "New")
+        .all()
+    )
+    for row in rows:
+        if not row.related_prompt_id:
+            continue
+        prompt = db.query(models.Prompt).filter_by(prompt_id=row.related_prompt_id).one_or_none()
+        if prompt and prompt.monitor_status == "Good":
+            row.status = "Rejected"
+            rejected_good += 1
+            continue
+        if prompt and prompt.monitor_status in ("Gap", "Risk"):
+            active_by_prompt.setdefault(row.related_prompt_id, []).append(row)
+
+    for recs in active_by_prompt.values():
+        recs.sort(key=lambda r: (r.priority_score or 0, r.created_at), reverse=True)
+        for stale in recs[1:]:
+            stale.status = "Rejected"
+            rejected_duplicates += 1
+
+    db.commit()
+    return {
+        "rejected_good_prompt_recommendations": rejected_good,
+        "rejected_duplicate_prompt_recommendations": rejected_duplicates,
+    }
 
 
 @router.get("/{rec_id}", response_model=schemas.RecommendationOut)
@@ -121,5 +170,13 @@ def delete_recommendation(rec_id: str, db: Session = Depends(get_db)):
 @router.post("/generate", response_model=List[schemas.RecommendationOut])
 def generate(req: schemas.GenerateRequest, db: Session = Depends(get_db)):
     """Generate one or more recommendations using OpenAI for the given target."""
+    if req.prompt_id:
+        prompt = db.query(models.Prompt).filter_by(prompt_id=req.prompt_id).one_or_none()
+        if not prompt:
+            raise HTTPException(404, "Prompt not found")
+        if prompt.monitor_status == "Unchecked":
+            raise HTTPException(409, "Run monitoring before generating recommendations.")
+        if prompt.monitor_status == "Good":
+            raise HTTPException(409, "Prompt already has OCSiAl/TUBALL visibility.")
     new_recs = generate_recommendations(db=db, request=req)
     return new_recs

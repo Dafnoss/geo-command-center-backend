@@ -338,6 +338,8 @@ class TaskStatusSegment(BaseModel):
 
 class DashboardOut(BaseModel):
     top_issue: str
+    imported_prompts: KpiDelta
+    run_coverage: KpiDelta
     ai_visibility: KpiDelta
     domain_citation: KpiDelta
     competitor_pressure: KpiDelta

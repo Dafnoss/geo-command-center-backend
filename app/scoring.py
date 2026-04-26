@@ -25,7 +25,7 @@ def ai_visibility_score(ai_results: list) -> int:
     if not ai_results:
         return 0
     n = len(ai_results)
-    brand = sum(1 for r in ai_results if _get(r, "brand_mentioned")) / n
+    brand = sum(1 for r in ai_results if _visible(r)) / n
     product = sum(1 for r in ai_results if _get(r, "product_mentioned")) / n
     domain = sum(1 for r in ai_results if _get(r, "domain_cited")) / n
     # quality is 1..5; normalize to 0..1
@@ -192,3 +192,7 @@ def _nonempty_list(v) -> bool:
     if isinstance(v, (list, tuple)):
         return len(v) > 0
     return True
+
+
+def _visible(row) -> bool:
+    return bool(_get(row, "brand_mentioned") or _get(row, "product_mentioned"))

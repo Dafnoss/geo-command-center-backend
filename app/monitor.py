@@ -12,18 +12,20 @@ import os
 import re
 import uuid
 from datetime import datetime, date
-from typing import Optional, Tuple
-from urllib.parse import urlparse
+from typing import Tuple
 
 from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.config import settings as app_settings
-from app.scoring import (
-    ai_visibility_score,
-    recommendation_priority_score,
-)
 from app.recommender import generate_recommendations
+from app.visibility import (
+    brand_success_terms,
+    derive_monitor_status,
+    detect_terms,
+    domain_matches_owned,
+    domain_of,
+)
 
 
 URL_RE = re.compile(r"https?://[^\s)>\]\"']+", re.IGNORECASE)
@@ -71,22 +73,12 @@ def _extract_urls(text: str) -> list[str]:
 
 
 def _domain_of(url: str) -> str:
-    try:
-        return (urlparse(url).hostname or "").lower().lstrip("www.")
-    except Exception:
-        return ""
+    return domain_of(url)
 
 
 def _detect(text: str, needles: list[str]) -> list[str]:
     """Return the subset of `needles` that appear (case-insensitive) in text."""
-    if not text:
-        return []
-    low = text.lower()
-    found = []
-    for n in needles:
-        if n and n.lower() in low:
-            found.append(n)
-    return found
+    return detect_terms(text, needles)
 
 
 def _check_monthly_cap(db: Session) -> bool:
@@ -141,8 +133,10 @@ def run_query(db: Session, prompt: models.Prompt) -> dict:
     model = _setting(db, "openai_model", app_settings.openai_model or "gpt-4o-mini")
     target_brand   = _setting(db, "target_brand",   "OCSiAl")
     target_product = _setting(db, "target_product", "TUBALL")
+    aliases        = _list_setting(db, "brand_aliases")
     competitors    = _list_setting(db, "competitors")
     owned_domains  = [d.lower() for d in _list_setting(db, "owned_domains")]
+    success_terms   = brand_success_terms(target_brand, target_product, aliases)
 
     result = _call_openai(prompt.prompt_text, model, api_key)
     answer = result["answer"]
@@ -150,13 +144,14 @@ def run_query(db: Session, prompt: models.Prompt) -> dict:
     # Parse mentions
     brand_in   = bool(_detect(answer, [target_brand]))
     product_in = bool(_detect(answer, [target_product]))
+    visible_in = bool(_detect(answer, success_terms))
     comps      = _detect(answer, competitors)
 
     # Extract URLs/domains
     urls = _extract_urls(answer)
     cited_domains = [_domain_of(u) for u in urls]
     cited_domains = [d for d in cited_domains if d]
-    domain_cited = any(any(od in d for od in owned_domains) for d in cited_domains)
+    domain_cited = any(domain_matches_owned(d, owned_domains) for d in cited_domains)
 
     # Heuristic answer-quality (1..5) — based on length + structure
     quality = 1
@@ -181,6 +176,7 @@ def run_query(db: Session, prompt: models.Prompt) -> dict:
         entities=[
             {"label": "Brand",       "items": [target_brand] if brand_in else []},
             {"label": "Product",     "items": [target_product] if product_in else []},
+            {"label": "Success entities", "items": _detect(answer, success_terms)},
             {"label": "Competitors", "items": comps},
         ],
         answer_quality_score=quality,
@@ -196,14 +192,7 @@ def run_query(db: Session, prompt: models.Prompt) -> dict:
     prompt.competitors_mentioned = comps
     prompt.cited_sources     = [_domain_of(u) for u in urls if _domain_of(u)]
     prompt.answer_quality_score = quality
-    if brand_in and domain_cited:
-        prompt.monitor_status = "Good"
-    elif not brand_in:
-        prompt.monitor_status = "Gap"
-    elif comps and not domain_cited:
-        prompt.monitor_status = "Risk"
-    else:
-        prompt.monitor_status = "Needs review"
+    prompt.monitor_status = derive_monitor_status(visible=visible_in, competitors=comps)
 
     # Upsert Sources from the cited URLs
     for u in urls:
@@ -220,9 +209,9 @@ def run_query(db: Session, prompt: models.Prompt) -> dict:
             existing.mentions_brand      = existing.mentions_brand      or brand_in
             existing.mentions_product    = existing.mentions_product    or product_in
             existing.mentions_competitor = existing.mentions_competitor or bool(comps)
-            existing.links_to_owned_domain = existing.links_to_owned_domain or any(od in d for od in owned_domains)
+            existing.links_to_owned_domain = existing.links_to_owned_domain or domain_matches_owned(d, owned_domains)
         else:
-            owned = any(od in d for od in owned_domains)
+            owned = domain_matches_owned(d, owned_domains)
             db.add(models.Source(
                 source_id=f"S-{uuid.uuid4().hex[:8].upper()}",
                 source_url=u,
@@ -254,6 +243,15 @@ def run_query(db: Session, prompt: models.Prompt) -> dict:
     ))
 
     db.commit()
+
+    # If the prompt is now visible, retire stale active recommendations for it.
+    if prompt.monitor_status == "Good":
+        for rec in db.query(models.Recommendation).filter(
+            models.Recommendation.related_prompt_id == prompt.prompt_id,
+            models.Recommendation.status == "New",
+        ).all():
+            rec.status = "Rejected"
+        db.commit()
 
     # Auto-generate one recommendation if visibility is weak and there isn't one already
     weak = prompt.monitor_status in ("Gap", "Risk")

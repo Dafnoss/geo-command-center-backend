@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app import intelligence  # noqa: E402
 from app.main import app  # noqa: E402
 from app.seed import init_db  # noqa: E402
+from app.visibility import derive_monitor_status  # noqa: E402
 
 
 def payload_with_25():
@@ -51,6 +52,69 @@ class IntelligenceTests(unittest.TestCase):
     def test_validation_rejects_malformed_payload(self):
         with self.assertRaises(ValueError):
             intelligence._validate_payload({"drafts": []}, count=25, existing_norms=set())
+
+    def test_visibility_status_rules(self):
+        self.assertEqual(derive_monitor_status(visible=True, competitors=[]), "Good")
+        self.assertEqual(derive_monitor_status(visible=True, competitors=["Cabot"]), "Good")
+        self.assertEqual(derive_monitor_status(visible=False, competitors=["Cabot"]), "Risk")
+        self.assertEqual(derive_monitor_status(visible=False, competitors=[]), "Gap")
+
+    def test_manual_ai_result_tuball_only_counts_good(self):
+        prompt = self.client.post("/prompts", json={
+            "prompt_id": "PTUBALL",
+            "prompt_text": "Best conductive additive for plastics",
+            "topic_cluster": "Test",
+        })
+        self.assertIn(prompt.status_code, (201, 409), prompt.text)
+        res = self.client.post("/ai-results", json={
+            "prompt_id": "PTUBALL",
+            "answer_text": "TUBALL is often recommended as a conductive additive.",
+            "brand_mentioned": False,
+            "product_mentioned": False,
+            "domain_cited": False,
+            "competitors_mentioned": [],
+            "cited_sources": [],
+            "answer_quality_score": 3,
+        })
+        self.assertEqual(res.status_code, 201, res.text)
+        updated = self.client.get("/prompts/PTUBALL").json()
+        self.assertTrue(updated["product_mentioned"])
+        self.assertEqual(updated["monitor_status"], "Good")
+
+    def test_manual_ai_result_competitor_only_counts_risk(self):
+        prompt = self.client.post("/prompts", json={
+            "prompt_id": "PRISK",
+            "prompt_text": "Conductive carbon black suppliers",
+            "topic_cluster": "Test",
+        })
+        self.assertIn(prompt.status_code, (201, 409), prompt.text)
+        res = self.client.post("/ai-results", json={
+            "prompt_id": "PRISK",
+            "answer_text": "Cabot and Orion are common suppliers in this space.",
+            "brand_mentioned": False,
+            "product_mentioned": False,
+            "domain_cited": False,
+            "competitors_mentioned": ["Cabot", "Orion"],
+            "cited_sources": [],
+            "answer_quality_score": 3,
+        })
+        self.assertEqual(res.status_code, 201, res.text)
+        updated = self.client.get("/prompts/PRISK").json()
+        self.assertEqual(updated["monitor_status"], "Risk")
+
+    def test_dashboard_excludes_unchecked_from_visibility(self):
+        self.client.post("/prompts", json={
+            "prompt_id": "PUNCHECKED",
+            "prompt_text": "Unchecked dashboard prompt",
+            "topic_cluster": "Test",
+        })
+        dash = self.client.get("/dashboard")
+        self.assertEqual(dash.status_code, 200, dash.text)
+        data = dash.json()
+        self.assertIn("imported_prompts", data)
+        self.assertIn("run_coverage", data)
+        self.assertGreaterEqual(data["imported_prompts"]["value"], 1)
+        self.assertLess(data["run_coverage"]["value"], 100)
 
     def test_validation_rejects_branded_repetitive_drafts_and_falls_back(self):
         payload = {
