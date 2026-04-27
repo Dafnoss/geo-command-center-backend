@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import uuid
+from datetime import date
 
 
 os.environ["DATABASE_URL"] = "sqlite:///" + tempfile.mktemp(prefix="geocc-intel-", suffix=".db")
@@ -10,6 +11,8 @@ os.environ["OPENAI_API_KEY"] = "test-key"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import intelligence  # noqa: E402
+from app import models  # noqa: E402
+from app.database import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
 from app.seed import init_db  # noqa: E402
 from app.visibility import derive_monitor_status  # noqa: E402
@@ -178,12 +181,138 @@ class IntelligenceTests(unittest.TestCase):
         rec = next((r for r in data["recommendations"] if r["score_breakdown"].get("cluster") == "Processor Test"), None)
         self.assertIsNotNone(rec)
         self.assertEqual(rec["score_breakdown"]["scope"], "cluster")
-        self.assertEqual(rec["score_breakdown"]["source"], "prompt_evidence")
+        self.assertEqual(rec["score_breakdown"]["source"], "cluster_evidence")
         self.assertEqual(rec["score_breakdown"]["prompt_count"], 2)
+        self.assertIn(rec["type"], {
+            "Add Comparison Section",
+            "Create Source Page",
+            "Add FAQ / Buyer Questions",
+            "Add Citation Proof",
+            "Upgrade Existing Page",
+        })
 
         summary = self.client.get("/recommendations/summary")
         self.assertEqual(summary.status_code, 200, summary.text)
         self.assertIn("cluster_level", summary.json())
+
+    def test_recommendation_type_comparison_when_competitor_pressure_high(self):
+        suffix = uuid.uuid4().hex[:8]
+        ids = [f"PCOMP-{suffix}-{i}" for i in range(3)]
+        for prompt_id in ids:
+            self.client.post("/prompts", json={
+                "prompt_id": prompt_id,
+                "prompt_text": "Best conductive additive supplier",
+                "topic_cluster": f"Comparison {suffix}",
+                "business_priority": 5,
+            })
+            self.client.post("/ai-results", json={
+                "prompt_id": prompt_id,
+                "answer_text": "Cabot, Orion, and Nanocyl are often compared.",
+                "competitors_mentioned": ["Cabot", "Orion", "Nanocyl"],
+                "cited_sources": ["https://cabotcorp.com"],
+                "answer_quality_score": 3,
+            })
+        data = self.client.post("/recommendations/process-prompts").json()
+        rec = next(r for r in data["recommendations"] if r["score_breakdown"].get("cluster") == f"Comparison {suffix}")
+        self.assertEqual(rec["type"], "Add Comparison Section")
+        self.assertEqual(rec["score_breakdown"]["opportunity_type"], "Add Comparison Section")
+
+    def test_recommendation_type_upgrade_existing_page_with_gsc_ga4_leverage(self):
+        suffix = uuid.uuid4().hex[:8]
+        cluster = f"Leverage {suffix}"
+        prompt_id = f"PLEV-{suffix}"
+        self.client.post("/prompts", json={
+            "prompt_id": prompt_id,
+            "prompt_text": "conductive additive for polymer compounds",
+            "topic_cluster": cluster,
+            "business_priority": 5,
+        })
+        self.client.post("/ai-results", json={
+            "prompt_id": prompt_id,
+            "answer_text": "Several suppliers exist but the answer does not name the target brand.",
+            "answer_quality_score": 3,
+        })
+        db = SessionLocal()
+        try:
+            db.add(models.GoogleSearchMetric(
+                metric_id=f"GSC-{suffix}",
+                site_url="https://tuball.com/",
+                date_start=date.today(),
+                date_end=date.today(),
+                query="conductive additive polymer compounds",
+                page="https://tuball.com/polymer-conductive-additives",
+                clicks=40,
+                impressions=4000,
+                avg_position=9.5,
+            ))
+            db.add(models.GoogleAnalyticsMetric(
+                metric_id=f"GA4-{suffix}",
+                property_id="381976460",
+                date_start=date.today(),
+                date_end=date.today(),
+                page_path="/polymer-conductive-additives",
+                page_title="Conductive additives for polymer compounds",
+                active_users=500,
+                sessions=650,
+            ))
+            db.commit()
+        finally:
+            db.close()
+        data = self.client.post("/recommendations/process-prompts").json()
+        rec = next(r for r in data["recommendations"] if r["score_breakdown"].get("cluster") == cluster)
+        self.assertEqual(rec["type"], "Upgrade Existing Page")
+        self.assertTrue(rec["score_breakdown"]["target_pages"])
+
+    def test_evidence_clusters_endpoint_returns_canonical_model(self):
+        suffix = uuid.uuid4().hex[:8]
+        cluster = f"Evidence {suffix}"
+        prompt_id = f"PEV-{suffix}"
+        self.client.post("/prompts", json={
+            "prompt_id": prompt_id,
+            "prompt_text": "best conductive additive for coatings",
+            "topic_cluster": cluster,
+        })
+        self.client.post("/ai-results", json={
+            "prompt_id": prompt_id,
+            "answer_text": "Cabot is often cited for conductive coatings.",
+            "competitors_mentioned": ["Cabot"],
+            "cited_sources": ["https://cabotcorp.com"],
+            "answer_quality_score": 3,
+        })
+        res = self.client.get("/evidence/clusters")
+        self.assertEqual(res.status_code, 200, res.text)
+        row = next((r for r in res.json() if r["cluster"] == cluster), None)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["risk_count"], 1)
+        self.assertEqual(row["competitor_pressure_rate"], 100)
+        self.assertIn("opportunity_type", row)
+
+    def test_recommendation_done_stores_lifecycle_metadata(self):
+        suffix = uuid.uuid4().hex[:8]
+        prompt_id = f"PDONE-{suffix}"
+        self.client.post("/prompts", json={
+            "prompt_id": prompt_id,
+            "prompt_text": "best antistatic additive",
+            "topic_cluster": f"Done {suffix}",
+        })
+        self.client.post("/ai-results", json={
+            "prompt_id": prompt_id,
+            "answer_text": "No specific brand answer.",
+            "answer_quality_score": 3,
+        })
+        data = self.client.post("/recommendations/process-prompts").json()
+        rec = next(r for r in data["recommendations"] if r["score_breakdown"].get("cluster") == f"Done {suffix}")
+        done = self.client.patch(f"/recommendations/{rec['recommendation_id']}/status", json={
+            "status": "Done",
+            "notes": "Published page update.",
+            "affected_page_url": "https://tuball.com/test-page",
+            "expected_prompt_ids": [prompt_id],
+        })
+        self.assertEqual(done.status_code, 200, done.text)
+        meta = done.json()["score_breakdown"]
+        self.assertEqual(done.json()["status"], "Done")
+        self.assertEqual(meta["lifecycle"]["notes"], "Published page update.")
+        self.assertIn("completed_at", meta["lifecycle"])
 
     def test_validation_rejects_branded_repetitive_drafts_and_falls_back(self):
         payload = {

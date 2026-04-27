@@ -253,7 +253,10 @@ class RecommendationCreate(BaseModel):
 
 
 class RecommendationStatusUpdate(BaseModel):
-    status: Literal["New", "Approved", "Rejected", "Task created"]
+    status: Literal["New", "Accepted", "In Progress", "Done", "Rejected", "Stale", "Approved", "Task created"]
+    notes: str = ""
+    affected_page_url: str = ""
+    expected_prompt_ids: List[str] = []
 
 
 class GenerateRequest(BaseModel):
@@ -281,6 +284,35 @@ class RecommendationProcessOut(BaseModel):
     updated: int
     rejected_stale: int
     recommendations: List[RecommendationOut]
+
+
+class ClusterEvidenceOut(BaseModel):
+    cluster: str
+    prompt_count: int
+    run_count: int
+    good_count: int
+    risk_count: int
+    gap_count: int
+    coverage_rate: int
+    brand_mention_rate: int
+    owned_citation_rate: int
+    competitor_pressure_rate: int
+    top_competitors: List[dict] = []
+    top_external_sources: List[dict] = []
+    top_owned_sources: List[dict] = []
+    gsc_impressions: int = 0
+    gsc_clicks: int = 0
+    gsc_avg_position: float = 0
+    ga4_sessions: int = 0
+    ga4_users: int = 0
+    top_gsc_queries: List[dict] = []
+    top_ga4_pages: List[dict] = []
+    best_existing_page: Optional[dict] = None
+    linked_prompt_ids: List[str] = []
+    linked_prompt_texts: List[str] = []
+    priority_components: dict
+    opportunity_type: str
+    opportunity_title: str
 
 
 # ---------------- Market intelligence ----------------

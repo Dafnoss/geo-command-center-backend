@@ -17,6 +17,7 @@ from app.routers import (
     recommendations,
     tasks,
     dashboard,
+    evidence as evidence_router,
     settings as settings_router,
     monitor as monitor_router,
     intelligence as intelligence_router,
@@ -53,6 +54,7 @@ def health():
 
 # Routers
 app.include_router(dashboard.router)
+app.include_router(evidence_router.router)
 app.include_router(prompts.router)
 app.include_router(ai_results.router)
 app.include_router(sources.router)

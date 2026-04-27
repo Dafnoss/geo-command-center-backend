@@ -14,13 +14,13 @@ import json
 import os
 import uuid
 from datetime import datetime
-from collections import Counter, defaultdict
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.config import settings as app_settings
+from app.evidence import build_cluster_evidence
 from app.scoring import recommendation_priority_score
 
 
@@ -324,152 +324,47 @@ def _matching_analytics_metrics(db: Session, prompts: list[models.Prompt], limit
 
 
 def process_prompt_evidence_recommendations(db: Session) -> dict:
-    """Create consolidated recommendations from all monitored prompt evidence.
+    """Create deterministic strategic recommendations from canonical evidence."""
+    all_evidence = build_cluster_evidence(db)
+    weak_evidence = [
+        e for e in all_evidence
+        if (e["gap_count"] + e["risk_count"]) > 0
+    ]
 
-    This is the strategic recommendation engine for the MVP. It deliberately uses
-    prompt evidence only, keeps history by rejecting stale rows instead of
-    deleting, and prefers cluster-level actions over one recommendation per prompt.
-    """
-    run_prompts = (
-        db.query(models.Prompt)
-        .filter(models.Prompt.monitor_status.in_(("Gap", "Risk")))
-        .all()
-    )
-
-    groups: dict[str, list[models.Prompt]] = defaultdict(list)
-    for prompt in run_prompts:
-        groups[prompt.topic_cluster or "Uncategorized"].append(prompt)
-
-    active_clusters = set(groups.keys())
+    active_clusters = {e["cluster"] for e in weak_evidence}
     rejected_stale = 0
-    for rec in db.query(models.Recommendation).filter(models.Recommendation.status == "New").all():
+    for rec in db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all():
         meta = rec.score_breakdown or {}
-        if rec.related_prompt_id and meta.get("source") != "prompt_evidence":
-            rec.status = "Rejected"
-            rejected_stale += 1
+        if meta.get("source") not in ("prompt_evidence", "cluster_evidence"):
             continue
-        if meta.get("source") != "prompt_evidence":
-            continue
-        if meta.get("scope") == "cluster" and meta.get("cluster") not in active_clusters:
-            rec.status = "Rejected"
+        if meta.get("cluster") not in active_clusters:
+            rec.status = "Stale"
             rejected_stale += 1
-        if rec.related_prompt_id:
-            prompt = db.query(models.Prompt).filter_by(prompt_id=rec.related_prompt_id).one_or_none()
-            if not prompt or prompt.monitor_status == "Good":
-                rec.status = "Rejected"
-                rejected_stale += 1
 
     created = 0
     updated = 0
     output: list[models.Recommendation] = []
 
-    sorted_groups = sorted(
-        groups.items(),
-        key=lambda item: (
-            sum(1 for p in item[1] if p.monitor_status == "Gap"),
-            sum(1 for p in item[1] if p.monitor_status == "Risk"),
-            sum(p.business_priority for p in item[1]),
-        ),
-        reverse=True,
-    )
+    for item in weak_evidence[:10]:
+        cluster = item["cluster"]
+        prompt_ids = item["linked_prompt_ids"]
+        top_prompt_id = prompt_ids[0] if prompt_ids else None
+        rec_type = item["opportunity_type"]
+        title = item["opportunity_title"]
+        best_page = item.get("best_existing_page") or {}
+        components = item["priority_components"]
+        priority_score = components["priority_score"]
+        confidence_score = components["confidence"]
 
-    for cluster, prompts in sorted_groups[:10]:
-        total = len(prompts)
-        gaps = [p for p in prompts if p.monitor_status == "Gap"]
-        risks = [p for p in prompts if p.monitor_status == "Risk"]
-        cited = [p for p in prompts if p.domain_cited]
-        visible = [p for p in prompts if p.brand_mentioned or p.product_mentioned]
-        top_prompt = sorted(prompts, key=lambda p: (p.business_priority, p.answer_quality_score), reverse=True)[0]
-        competitors = Counter(c for p in prompts for c in (p.competitors_mentioned or []))
-        sources = Counter(s for p in prompts for s in (p.cited_sources or []))
-        search_metrics = _matching_search_metrics(db, prompts)
-        analytics_metrics = _matching_analytics_metrics(db, prompts)
-        search_impressions = sum(m.impressions for m in search_metrics)
-        search_clicks = sum(m.clicks for m in search_metrics)
-        avg_position = (
-            round(sum(m.avg_position * max(m.impressions, 1) for m in search_metrics) / sum(max(m.impressions, 1) for m in search_metrics), 1)
-            if search_metrics else 0
-        )
-        ga_sessions = sum(m.sessions for m in analytics_metrics)
-
-        visibility_rate = round(len(visible) / total * 100) if total else 0
-        citation_rate = round(len(cited) / total * 100) if total else 0
-        competitor_rate = round(len(risks) / total * 100) if total else 0
-        search_boost = 8 if search_impressions >= 1000 else (4 if search_impressions >= 100 else 0)
-        traffic_boost = 5 if ga_sessions >= 100 else (2 if ga_sessions > 0 else 0)
-        priority_score = min(98, 45 + len(gaps) * 6 + len(risks) * 4 + max(p.business_priority for p in prompts) * 5 + search_boost + traffic_boost)
-
-        if risks and competitors:
-            rec_type = "Add comparison table"
-            title = (
-                "Strengthen comparison content against cited competitors"
-                if cluster.strip().lower() == "comparison"
-                else f"Add {cluster} competitor comparison content"
-            )
-        elif citation_rate == 0:
-            rec_type = "Add citations/sources"
-            title = f"Make OCSiAl/TUBALL citable for {cluster}"
-        else:
-            rec_type = "Create new page"
-            title = f"Create an OCSiAl/TUBALL answer hub for {cluster}"
-
-        evidence = [
-            f"{total} run prompts in this cluster are still Gap/Risk.",
-            f"{len(gaps)} Gap prompts do not mention OCSiAl/TUBALL.",
-            f"{len(risks)} Risk prompts mention competitors without enough OCSiAl/TUBALL visibility.",
-            f"Owned domains are cited in {citation_rate}% of these prompts.",
-        ]
-        if competitors:
-            evidence.append("Top competitors appearing: " + ", ".join(c for c, _ in competitors.most_common(4)) + ".")
-        if sources:
-            evidence.append("LLM-cited sources include: " + ", ".join(s for s, _ in sources.most_common(4)) + ".")
-        if search_metrics:
-            evidence.append(
-                f"Google Search Console shows {search_impressions:,} impressions and {search_clicks:,} clicks for related queries "
-                f"(avg position {avg_position})."
-            )
-            top_queries = ", ".join(m.query for m in search_metrics[:3] if m.query)
-            if top_queries:
-                evidence.append("Related Google queries: " + top_queries + ".")
-        if analytics_metrics:
-            evidence.append(f"GA4 shows {ga_sessions:,} sessions on related pages in the synced range.")
-
-        actions = [
-            f"Create or update one authoritative {cluster} page that directly answers the highest-priority prompts.",
-            "Name OCSiAl and TUBALL early, then explain why graphene nanotubes/SWCNT matter for the use case.",
-            "Add a concise comparison section against the most-cited substitutes and competitors.",
-            "Add quotable technical claims, application examples, and source-style references that LLMs can reuse.",
-            "Link the page from relevant OCSiAl/TUBALL pages and rerun this cluster after publishing.",
-        ]
-        if search_metrics:
-            actions.insert(1, "Use the related Search Console queries as H2/FAQ wording so the page captures existing demand.")
-        if analytics_metrics:
-            actions.append("Update the already-trafficked GA4 pages first if they match this cluster; they are faster to turn into citation assets.")
-        acceptance = [
-            "Page directly answers at least five monitored prompts from this cluster.",
-            "Includes OCSiAl, TUBALL, owned-domain references, and comparison language.",
-            "After rerun, at least one prompt in the cluster moves from Gap/Risk to Good.",
-        ]
-        meta = {
-            "source": "prompt_evidence",
-            "scope": "cluster",
-            "cluster": cluster,
-            "prompt_count": total,
-            "gap_count": len(gaps),
-            "risk_count": len(risks),
-            "owned_citation_rate": citation_rate,
-            "visibility_rate": visibility_rate,
-            "competitor_rate": competitor_rate,
-            "gsc_impressions": search_impressions,
-            "gsc_clicks": search_clicks,
-            "gsc_avg_position": avg_position,
-            "ga4_sessions": ga_sessions,
-        }
+        evidence = _strategic_evidence(item)
+        actions = _strategic_actions(item)
+        acceptance = _strategic_acceptance(item)
+        meta = _recommendation_meta(item)
 
         existing = None
-        for rec in db.query(models.Recommendation).filter(models.Recommendation.status == "New").all():
+        for rec in db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all():
             rec_meta = rec.score_breakdown or {}
-            if rec_meta.get("source") == "prompt_evidence" and rec_meta.get("scope") == "cluster" and rec_meta.get("cluster") == cluster:
+            if rec_meta.get("source") in ("prompt_evidence", "cluster_evidence") and rec_meta.get("cluster") == cluster:
                 existing = rec
                 break
 
@@ -477,17 +372,15 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
             row = existing
             row.title = title[:200]
             row.type = rec_type
-            row.diagnosis = (
-                f"{cluster} is underperforming in monitored AI answers: visibility is {visibility_rate}% "
-                f"and owned citation rate is {citation_rate}%. This is a strategic content/source gap, not just one bad prompt."
-            )
-            row.evidence = evidence[:6]
+            row.diagnosis = _strategic_diagnosis(item)
+            row.evidence = evidence[:8]
             row.recommended_actions = actions
             row.acceptance_criteria = acceptance
-            row.related_prompt_id = top_prompt.prompt_id
+            row.related_prompt_id = top_prompt_id
+            row.related_url = best_page.get("url") or None
             row.priority_score = priority_score
-            row.confidence_score = 80 if total >= 3 else 65
-            row.expected_impact = f"Improve OCSiAl/TUBALL visibility across {total} related monitored prompts."
+            row.confidence_score = confidence_score
+            row.expected_impact = _strategic_impact(item)
             row.score_breakdown = meta
             updated += 1
         else:
@@ -495,19 +388,16 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
                 recommendation_id=f"R-{uuid.uuid4().hex[:8].upper()}",
                 title=title[:200],
                 type=rec_type,
-                diagnosis=(
-                    f"{cluster} is underperforming in monitored AI answers: visibility is {visibility_rate}% "
-                    f"and owned citation rate is {citation_rate}%. This is a strategic content/source gap, not just one bad prompt."
-                ),
-                evidence=evidence[:6],
+                diagnosis=_strategic_diagnosis(item),
+                evidence=evidence[:8],
                 recommended_actions=actions,
                 acceptance_criteria=acceptance,
-                related_prompt_id=top_prompt.prompt_id,
-                related_url=None,
+                related_prompt_id=top_prompt_id,
+                related_url=best_page.get("url") or None,
                 related_source_id=None,
                 priority_score=priority_score,
-                confidence_score=80 if total >= 3 else 65,
-                expected_impact=f"Improve OCSiAl/TUBALL visibility across {total} related monitored prompts.",
+                confidence_score=confidence_score,
+                expected_impact=_strategic_impact(item),
                 status="New",
                 created_at=datetime.utcnow(),
                 score_breakdown=meta,
@@ -521,10 +411,119 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
         db.refresh(rec)
 
     return {
-        "considered_prompts": len(run_prompts),
-        "clusters_processed": len(sorted_groups[:10]),
+        "considered_prompts": sum(e["gap_count"] + e["risk_count"] for e in weak_evidence),
+        "clusters_processed": len(weak_evidence[:10]),
         "created": created,
         "updated": updated,
         "rejected_stale": rejected_stale,
         "recommendations": output,
+    }
+
+
+def _strategic_evidence(item: dict) -> list[str]:
+    evidence = [
+        f"{item['gap_count'] + item['risk_count']} of {item['run_count']} run prompts are Gap/Risk.",
+        f"AI coverage is {item['coverage_rate']}%; brand mention is {item['brand_mention_rate']}%; owned citation is {item['owned_citation_rate']}%.",
+        f"Competitor pressure is {item['competitor_pressure_rate']}%.",
+    ]
+    if item["top_competitors"]:
+        evidence.append("Top competitors: " + ", ".join(x["name"] for x in item["top_competitors"][:4]) + ".")
+    if item["top_external_sources"]:
+        evidence.append("LLM-cited external sources: " + ", ".join(x["domain"] for x in item["top_external_sources"][:4]) + ".")
+    if item["top_owned_sources"]:
+        evidence.append("Owned sources already cited: " + ", ".join(x["domain"] for x in item["top_owned_sources"][:3]) + ".")
+    if item["gsc_impressions"]:
+        evidence.append(f"GSC demand: {item['gsc_impressions']:,} impressions, {item['gsc_clicks']:,} clicks, avg position {item['gsc_avg_position']}.")
+    if item["ga4_sessions"]:
+        evidence.append(f"GA4 leverage: {item['ga4_sessions']:,} sessions on matching pages.")
+    if item.get("best_existing_page"):
+        page = item["best_existing_page"]
+        evidence.append(f"Best page candidate: {page.get('title') or page.get('url')} ({page.get('ga4_sessions', 0):,} sessions, {page.get('gsc_impressions', 0):,} impressions).")
+    return evidence
+
+
+def _strategic_diagnosis(item: dict) -> str:
+    cluster = item["cluster"]
+    typ = item["opportunity_type"]
+    return (
+        f"{cluster} has a measurable GEO opportunity: {item['coverage_rate']}% coverage, "
+        f"{item['owned_citation_rate']}% owned-source citation, and {item['competitor_pressure_rate']}% competitor pressure. "
+        f"The best next move is {typ.lower()} because this cluster combines LLM answer gaps with search/traffic evidence."
+    )
+
+
+def _strategic_actions(item: dict) -> list[str]:
+    cluster = item["cluster"]
+    typ = item["opportunity_type"]
+    best_page = item.get("best_existing_page") or {}
+    actions = []
+    if typ == "Upgrade Existing Page" and best_page:
+        actions.append(f"Upgrade the existing page candidate: {best_page.get('url') or best_page.get('title')}.")
+    elif typ == "Create Source Page":
+        actions.append(f"Create one authoritative OCSiAl/TUBALL source page for {cluster}.")
+    else:
+        actions.append(f"Create or update a focused {cluster} content asset.")
+    if typ in ("Add Comparison Section", "Defend Substitute Positioning") or item["competitor_pressure_rate"] >= 35:
+        comps = ", ".join(x["name"] for x in item["top_competitors"][:4]) or "the cited competitors/substitutes"
+        actions.append(f"Add a direct comparison section against {comps}.")
+    if typ == "Add FAQ / Buyer Questions" or item["top_gsc_queries"]:
+        qs = [q["query"] for q in item["top_gsc_queries"][:3] if q.get("query")]
+        actions.append("Add FAQ/H2 blocks matching buyer questions" + (": " + "; ".join(qs) if qs else "."))
+    if typ in ("Add Citation Proof", "Create Source Page") or item["owned_citation_rate"] < 35:
+        actions.append("Add citation-friendly proof: dosage ranges, use cases, material compatibility, claims, and source-style references.")
+    actions.extend([
+        "Mention OCSiAl and TUBALL early and consistently; treat TUBALL as the product line under OCSiAl.",
+        "Internally link the asset from relevant OCSiAl/TUBALL application and product pages.",
+        "After publishing, rerun the linked prompts and compare coverage, brand mention, and owned citation rates.",
+    ])
+    return actions
+
+
+def _strategic_acceptance(item: dict) -> list[str]:
+    return [
+        f"Asset directly answers at least {min(5, max(1, item['run_count']))} monitored prompts in {item['cluster']}.",
+        "Includes OCSiAl, TUBALL, owned-domain references, and source/citation language.",
+        "Includes comparison or substitute positioning when competitor pressure is above 30%.",
+        "After rerun, linked cluster coverage improves or at least one Gap/Risk prompt becomes Good.",
+    ]
+
+
+def _strategic_impact(item: dict) -> str:
+    return (
+        f"Improve coverage across {item['run_count']} monitored {item['cluster']} prompts "
+        f"and increase owned-source citation from {item['owned_citation_rate']}%."
+    )
+
+
+def _recommendation_meta(item: dict) -> dict:
+    components = item["priority_components"]
+    return {
+        "source": "cluster_evidence",
+        "scope": "cluster",
+        "opportunity_type": item["opportunity_type"],
+        "cluster": item["cluster"],
+        "prompt_count": item["run_count"],
+        "gap_count": item["gap_count"],
+        "risk_count": item["risk_count"],
+        "coverage_rate": item["coverage_rate"],
+        "visibility_rate": item["brand_mention_rate"],
+        "owned_citation_rate": item["owned_citation_rate"],
+        "competitor_rate": item["competitor_pressure_rate"],
+        "gsc_impressions": item["gsc_impressions"],
+        "gsc_clicks": item["gsc_clicks"],
+        "gsc_avg_position": item["gsc_avg_position"],
+        "ga4_sessions": item["ga4_sessions"],
+        "gap_severity": components["gap_severity"],
+        "competitor_pressure": components["competitor_pressure"],
+        "search_demand": components["search_demand"],
+        "existing_page_leverage": components["existing_page_leverage"],
+        "business_priority": components["business_priority"],
+        "confidence": components["confidence"],
+        "target_pages": [item["best_existing_page"]] if item.get("best_existing_page") else [],
+        "linked_prompt_ids": item["linked_prompt_ids"],
+        "linked_gsc_metric_ids": [q["metric_id"] for q in item["top_gsc_queries"]],
+        "linked_ga4_metric_ids": [p["metric_id"] for p in item["top_ga4_pages"]],
+        "top_competitors": item["top_competitors"],
+        "top_external_sources": item["top_external_sources"],
+        "top_owned_sources": item["top_owned_sources"],
     }

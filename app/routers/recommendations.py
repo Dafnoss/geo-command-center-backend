@@ -42,11 +42,11 @@ def list_recommendations(
     rows = q.order_by(models.Recommendation.priority_score.desc()).all()
     active = []
     for row in rows:
-        if row.status == "Rejected" and not status:
+        if row.status in ("Rejected", "Stale") and not status:
             continue
         if row.related_prompt_id:
             prompt = db.query(models.Prompt).filter_by(prompt_id=row.related_prompt_id).one_or_none()
-            if prompt and prompt.monitor_status == "Good" and not status:
+            if prompt and prompt.monitor_status == "Good" and not status and (row.score_breakdown or {}).get("source") != "cluster_evidence":
                 continue
         active.append(row)
     return active
@@ -55,7 +55,7 @@ def list_recommendations(
 @router.get("/summary", response_model=schemas.RecommendationSummaryOut)
 def recommendation_summary(db: Session = Depends(get_db)):
     rows = db.query(models.Recommendation).all()
-    active = [r for r in rows if r.status not in ("Rejected", "Approved", "Task created")]
+    active = [r for r in rows if r.status not in ("Rejected", "Stale", "Done", "Task created")]
     return schemas.RecommendationSummaryOut(
         total_active=len(active),
         high_priority=sum(1 for r in active if r.priority_score >= 80),
@@ -63,8 +63,8 @@ def recommendation_summary(db: Session = Depends(get_db)):
         risk_driven=sum(1 for r in active if (r.score_breakdown or {}).get("risk_count", 0) > 0),
         cluster_level=sum(1 for r in active if (r.score_breakdown or {}).get("scope") == "cluster"),
         prompt_level=sum(1 for r in active if (r.score_breakdown or {}).get("scope") != "cluster"),
-        approved_or_done=sum(1 for r in rows if r.status in ("Approved", "Task created")),
-        rejected=sum(1 for r in rows if r.status == "Rejected"),
+        approved_or_done=sum(1 for r in rows if r.status in ("Accepted", "In Progress", "Done", "Approved", "Task created")),
+        rejected=sum(1 for r in rows if r.status in ("Rejected", "Stale")),
     )
 
 
@@ -84,17 +84,13 @@ def cleanup_stale_recommendations(db: Session = Depends(get_db)):
     rejected_duplicates = 0
     active_by_prompt: dict[str, list[models.Recommendation]] = {}
 
-    rows = (
-        db.query(models.Recommendation)
-        .filter(models.Recommendation.status == "New")
-        .all()
-    )
+    rows = db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all()
     for row in rows:
         if not row.related_prompt_id:
             continue
         prompt = db.query(models.Prompt).filter_by(prompt_id=row.related_prompt_id).one_or_none()
         if prompt and prompt.monitor_status == "Good":
-            row.status = "Rejected"
+            row.status = "Stale"
             rejected_good += 1
             continue
         if prompt and prompt.monitor_status in ("Gap", "Risk"):
@@ -103,7 +99,7 @@ def cleanup_stale_recommendations(db: Session = Depends(get_db)):
     for recs in active_by_prompt.values():
         recs.sort(key=lambda r: (r.priority_score or 0, r.created_at), reverse=True)
         for stale in recs[1:]:
-            stale.status = "Rejected"
+            stale.status = "Stale"
             rejected_duplicates += 1
 
     db.commit()
@@ -152,8 +148,29 @@ def update_status(rec_id: str, data: schemas.RecommendationStatusUpdate, db: Ses
     if not row:
         raise HTTPException(404, "Recommendation not found")
     row.status = data.status
+    meta = dict(row.score_breakdown or {})
+    lifecycle = dict(meta.get("lifecycle") or {})
+    if data.notes:
+        lifecycle["notes"] = data.notes
+    if data.affected_page_url:
+        lifecycle["affected_page_url"] = data.affected_page_url
+        row.related_url = data.affected_page_url
+    if data.expected_prompt_ids:
+        lifecycle["expected_prompt_ids"] = data.expected_prompt_ids
+    if data.status == "Done":
+        lifecycle["completed_at"] = datetime.utcnow().isoformat()
+        lifecycle["baseline"] = {
+            "coverage_rate": meta.get("coverage_rate"),
+            "owned_citation_rate": meta.get("owned_citation_rate"),
+            "visibility_rate": meta.get("visibility_rate"),
+            "gap_count": meta.get("gap_count"),
+            "risk_count": meta.get("risk_count"),
+        }
+    meta["lifecycle"] = lifecycle
+    row.score_breakdown = meta
 
-    # If approved, auto-create a Task
+    # Legacy compatibility: Approved still creates a task, but the new lifecycle
+    # uses Accepted/In Progress/Done directly in the recommendation module.
     if data.status == "Approved":
         existing = db.query(models.Task).filter_by(recommendation_id=rec_id).first()
         if not existing:
