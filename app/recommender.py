@@ -330,9 +330,9 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
         e for e in all_evidence
         if (e["gap_count"] + e["risk_count"]) > 0
     ]
-    selected_evidence = weak_evidence[:10]
+    selected_evidence = _select_strategic_opportunities(weak_evidence, limit=10)
 
-    active_clusters = {e["cluster"] for e in selected_evidence}
+    active_keys = {e["recommendation_key"] for e in selected_evidence}
     rejected_stale = 0
     for rec in db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all():
         meta = rec.score_breakdown or {}
@@ -342,7 +342,8 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
             continue
         if meta.get("source") != "cluster_evidence":
             continue
-        if meta.get("cluster") not in active_clusters:
+        rec_key = meta.get("recommendation_key") or _legacy_recommendation_key(meta)
+        if rec_key not in active_keys:
             rec.status = "Stale"
             rejected_stale += 1
 
@@ -368,7 +369,8 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
         existing = None
         for rec in db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all():
             rec_meta = rec.score_breakdown or {}
-            if rec_meta.get("source") == "cluster_evidence" and rec_meta.get("cluster") == cluster:
+            rec_key = rec_meta.get("recommendation_key") or _legacy_recommendation_key(rec_meta)
+            if rec_meta.get("source") == "cluster_evidence" and rec_key == meta["recommendation_key"]:
                 existing = rec
                 break
 
@@ -426,12 +428,154 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
     }
 
 
+def _select_strategic_opportunities(items: list[dict], limit: int = 10) -> list[dict]:
+    """Collapse duplicate actions into fewer, higher-quality opportunities."""
+    grouped: dict[str, dict] = {}
+    for item in items:
+        key = _opportunity_key(item)
+        current = grouped.get(key)
+        if current is None:
+            grouped[key] = _clone_opportunity(item, key)
+        else:
+            _merge_opportunity(current, item)
+    return sorted(
+        grouped.values(),
+        key=lambda e: e["priority_components"]["priority_score"],
+        reverse=True,
+    )[:limit]
+
+
+def _opportunity_key(item: dict) -> str:
+    best_page = item.get("best_existing_page") or {}
+    page_url = best_page.get("url")
+    if item.get("opportunity_type") == "Upgrade Existing Page" and page_url:
+        return "page:" + page_url
+    return f"cluster:{item.get('opportunity_type')}:{item.get('cluster')}"
+
+
+def _legacy_recommendation_key(meta: dict) -> str:
+    target_pages = meta.get("target_pages") or []
+    page_url = target_pages[0].get("url") if target_pages and isinstance(target_pages[0], dict) else None
+    if meta.get("opportunity_type") == "Upgrade Existing Page" and page_url:
+        return "page:" + page_url
+    return f"cluster:{meta.get('opportunity_type')}:{meta.get('cluster')}"
+
+
+def _clone_opportunity(item: dict, key: str) -> dict:
+    out = dict(item)
+    out["recommendation_key"] = key
+    out["source_clusters"] = [item["cluster"]]
+    return out
+
+
+def _merge_opportunity(base: dict, item: dict) -> None:
+    clusters = list(dict.fromkeys(base.get("source_clusters", []) + [item["cluster"]]))
+    base["source_clusters"] = clusters
+    base["cluster"] = _cluster_group_label(clusters)
+    base["run_count"] += item["run_count"]
+    base["good_count"] += item["good_count"]
+    base["risk_count"] += item["risk_count"]
+    base["gap_count"] += item["gap_count"]
+    base["coverage_rate"] = _rate_from_count(base["good_count"], base["run_count"])
+    brand_count = round((base.get("brand_mention_rate", 0) / 100) * (base["run_count"] - item["run_count"]))
+    brand_count += round((item.get("brand_mention_rate", 0) / 100) * item["run_count"])
+    owned_count = round((base.get("owned_citation_rate", 0) / 100) * (base["run_count"] - item["run_count"]))
+    owned_count += round((item.get("owned_citation_rate", 0) / 100) * item["run_count"])
+    comp_count = round((base.get("competitor_pressure_rate", 0) / 100) * (base["run_count"] - item["run_count"]))
+    comp_count += round((item.get("competitor_pressure_rate", 0) / 100) * item["run_count"])
+    base["brand_mention_rate"] = _rate_from_count(brand_count, base["run_count"])
+    base["owned_citation_rate"] = _rate_from_count(owned_count, base["run_count"])
+    base["competitor_pressure_rate"] = _rate_from_count(comp_count, base["run_count"])
+    base["linked_prompt_ids"] = _unique(base["linked_prompt_ids"] + item["linked_prompt_ids"])
+    base["linked_prompt_texts"] = _unique(base["linked_prompt_texts"] + item["linked_prompt_texts"])[:12]
+    base["top_competitors"] = _merge_named_counts(base["top_competitors"], item["top_competitors"], "name")
+    base["top_external_sources"] = _merge_named_counts(base["top_external_sources"], item["top_external_sources"], "domain")
+    base["top_owned_sources"] = _merge_named_counts(base["top_owned_sources"], item["top_owned_sources"], "domain")
+    base["top_gsc_queries"] = _merge_metric_rows(base["top_gsc_queries"], item["top_gsc_queries"], "metric_id", "impressions")
+    base["top_ga4_pages"] = _merge_metric_rows(base["top_ga4_pages"], item["top_ga4_pages"], "metric_id", "sessions")
+    base["gsc_impressions"] = sum(r.get("impressions") or 0 for r in base["top_gsc_queries"])
+    base["gsc_clicks"] = sum(r.get("clicks") or 0 for r in base["top_gsc_queries"])
+    pos_weight = sum(max(r.get("impressions") or 0, 1) for r in base["top_gsc_queries"])
+    base["gsc_avg_position"] = round(sum((r.get("avg_position") or 0) * max(r.get("impressions") or 0, 1) for r in base["top_gsc_queries"]) / pos_weight, 1) if pos_weight else 0
+    base["ga4_sessions"] = sum(r.get("sessions") or 0 for r in base["top_ga4_pages"])
+    base["ga4_users"] = sum(r.get("active_users") or 0 for r in base["top_ga4_pages"])
+    base["opportunity_title"] = _merged_title(base)
+    _refresh_priority(base)
+
+
+def _refresh_priority(item: dict) -> None:
+    components = dict(item["priority_components"])
+    components["gap_severity"] = _rate_from_count(item["gap_count"] + item["risk_count"] * 0.7, item["run_count"])
+    components["competitor_pressure"] = item["competitor_pressure_rate"]
+    components["confidence"] = min(95, components.get("confidence", 50) + min(10, len(item.get("source_clusters", [])) * 2))
+    weights = {
+        "gap_severity": components.get("gap_severity", 0),
+        "competitor_pressure": components.get("competitor_pressure", 0),
+        "search_demand": components.get("search_demand", 0),
+        "existing_page_leverage": components.get("existing_page_leverage", 0),
+        "business_priority": components.get("business_priority", 0),
+        "confidence": components.get("confidence", 0),
+    }
+    raw = round(
+        weights["gap_severity"] * 0.30
+        + weights["competitor_pressure"] * 0.20
+        + weights["search_demand"] * 0.20
+        + weights["existing_page_leverage"] * 0.15
+        + weights["business_priority"] * 0.10
+        + weights["confidence"] * 0.05
+    )
+    components["priority_score"] = min(100, max(0, round((raw - 45) * 1.55 + 45)))
+    item["priority_components"] = components
+
+
+def _merged_title(item: dict) -> str:
+    if item.get("opportunity_type") == "Upgrade Existing Page" and item.get("best_existing_page"):
+        title = item.get("opportunity_title", "")
+        return title
+    return item.get("opportunity_title") or f"Improve {item['cluster']} AI visibility"
+
+
+def _cluster_group_label(clusters: list[str]) -> str:
+    if len(clusters) == 1:
+        return clusters[0]
+    return f"{len(clusters)} clusters"
+
+
+def _rate_from_count(count: float, total: int) -> int:
+    return round((count / total) * 100) if total else 0
+
+
+def _unique(values: list) -> list:
+    return list(dict.fromkeys(values))
+
+
+def _merge_named_counts(a: list[dict], b: list[dict], key: str) -> list[dict]:
+    counts: dict[str, int] = {}
+    for row in (a or []) + (b or []):
+        name = row.get(key)
+        if not name:
+            continue
+        counts[name] = counts.get(name, 0) + (row.get("count") or 0)
+    return [{key: k, "count": v} for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:8]]
+
+
+def _merge_metric_rows(a: list[dict], b: list[dict], key: str, sort_key: str) -> list[dict]:
+    rows: dict[str, dict] = {}
+    for row in (a or []) + (b or []):
+        row_key = row.get(key)
+        if row_key and row_key not in rows:
+            rows[row_key] = row
+    return sorted(rows.values(), key=lambda r: r.get(sort_key) or 0, reverse=True)[:8]
+
+
 def _strategic_evidence(item: dict) -> list[str]:
     evidence = [
         f"{item['gap_count'] + item['risk_count']} of {item['run_count']} run prompts are Gap/Risk.",
         f"AI coverage is {item['coverage_rate']}%; brand mention is {item['brand_mention_rate']}%; owned citation is {item['owned_citation_rate']}%.",
         f"Competitor pressure is {item['competitor_pressure_rate']}%.",
     ]
+    if len(item.get("source_clusters", [])) > 1:
+        evidence.append("Covers clusters: " + ", ".join(item["source_clusters"][:6]) + ("." if len(item["source_clusters"]) <= 6 else f", +{len(item['source_clusters']) - 6} more."))
     if item["top_competitors"]:
         evidence.append("Top competitors: " + ", ".join(x["name"] for x in item["top_competitors"][:4]) + ".")
     if item["top_external_sources"]:
@@ -451,10 +595,11 @@ def _strategic_evidence(item: dict) -> list[str]:
 def _strategic_diagnosis(item: dict) -> str:
     cluster = item["cluster"]
     typ = item["opportunity_type"]
+    subject = "This combined opportunity" if len(item.get("source_clusters", [])) > 1 else cluster
     return (
-        f"{cluster} has a measurable GEO opportunity: {item['coverage_rate']}% coverage, "
+        f"{subject} has a measurable GEO opportunity: {item['coverage_rate']}% coverage, "
         f"{item['owned_citation_rate']}% owned-source citation, and {item['competitor_pressure_rate']}% competitor pressure. "
-        f"The best next move is {typ.lower()} because this cluster combines LLM answer gaps with search/traffic evidence."
+        f"The best next move is {typ.lower()} because the evidence combines LLM answer gaps with search/traffic data."
     )
 
 
@@ -514,8 +659,10 @@ def _recommendation_meta(item: dict) -> dict:
     return {
         "source": "cluster_evidence",
         "scope": "cluster",
+        "recommendation_key": item["recommendation_key"],
         "opportunity_type": item["opportunity_type"],
         "cluster": item["cluster"],
+        "source_clusters": item.get("source_clusters", [item["cluster"]]),
         "prompt_count": item["run_count"],
         "gap_count": item["gap_count"],
         "risk_count": item["risk_count"],
