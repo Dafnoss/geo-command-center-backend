@@ -352,7 +352,6 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
     for item in weak_evidence[:10]:
         cluster = item["cluster"]
         prompt_ids = item["linked_prompt_ids"]
-        top_prompt_id = prompt_ids[0] if prompt_ids else None
         rec_type = item["opportunity_type"]
         title = item["opportunity_title"]
         best_page = item.get("best_existing_page") or {}
@@ -380,7 +379,9 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
             row.evidence = evidence[:8]
             row.recommended_actions = actions
             row.acceptance_criteria = acceptance
-            row.related_prompt_id = top_prompt_id
+            # Cluster evidence recommendations belong to the whole cluster, not
+            # to one arbitrary prompt. Linked prompts stay in score_breakdown.
+            row.related_prompt_id = None
             row.related_url = best_page.get("url") or None
             row.priority_score = priority_score
             row.confidence_score = confidence_score
@@ -396,7 +397,7 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
                 evidence=evidence[:8],
                 recommended_actions=actions,
                 acceptance_criteria=acceptance,
-                related_prompt_id=top_prompt_id,
+                related_prompt_id=None,
                 related_url=best_page.get("url") or None,
                 related_source_id=None,
                 priority_score=priority_score,
