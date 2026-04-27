@@ -23,6 +23,8 @@ SETTINGS = [
     {"setting_key": "research_model",       "setting_value": "gpt-4.1-mini",                                                           "notes": "OpenAI model used for market research and query generation."},
     {"setting_key": "automation_mode",      "setting_value": "off",                                                                    "notes": "off | manual | weekly"},
     {"setting_key": "monthly_cost_cap_usd", "setting_value": "20",                                                                     "notes": "Soft cap on OpenAI spend per month."},
+    {"setting_key": "google_search_console_sites", "setting_value": "",                                                                "notes": "Comma-separated GSC site URLs to sync. Empty means owned-domain matches."},
+    {"setting_key": "google_ga4_property_id",       "setting_value": "",                                                               "notes": "GA4 numeric property ID, e.g. 123456789."},
 ]
 
 

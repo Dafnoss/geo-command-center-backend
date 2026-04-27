@@ -163,6 +163,51 @@ class SeoMetric(Base):
     url_ref: Mapped["Url"] = relationship(back_populates="seo_metrics")
 
 
+class ConnectorAccount(Base):
+    __tablename__ = "connector_accounts"
+
+    connector_id: Mapped[str] = mapped_column(String, primary_key=True)
+    provider: Mapped[str] = mapped_column(String, index=True)
+    account_label: Mapped[str] = mapped_column(String, default="")
+    scopes: Mapped[list] = mapped_column(JSON, default=list)
+    token_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String, default="disconnected")
+    last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class GoogleSearchMetric(Base):
+    __tablename__ = "google_search_metrics"
+
+    metric_id: Mapped[str] = mapped_column(String, primary_key=True)
+    site_url: Mapped[str] = mapped_column(String, index=True)
+    date_start: Mapped[date] = mapped_column(Date, index=True)
+    date_end: Mapped[date] = mapped_column(Date, index=True)
+    query: Mapped[str] = mapped_column(Text, default="")
+    page: Mapped[str] = mapped_column(Text, default="")
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    impressions: Mapped[int] = mapped_column(Integer, default=0)
+    ctr: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_position: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class GoogleAnalyticsMetric(Base):
+    __tablename__ = "google_analytics_metrics"
+
+    metric_id: Mapped[str] = mapped_column(String, primary_key=True)
+    property_id: Mapped[str] = mapped_column(String, index=True)
+    date_start: Mapped[date] = mapped_column(Date, index=True)
+    date_end: Mapped[date] = mapped_column(Date, index=True)
+    page_path: Mapped[str] = mapped_column(Text, default="")
+    page_title: Mapped[str] = mapped_column(Text, default="")
+    active_users: Mapped[int] = mapped_column(Integer, default=0)
+    sessions: Mapped[int] = mapped_column(Integer, default=0)
+    conversions: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Recommendation(Base):
     __tablename__ = "recommendations"
 

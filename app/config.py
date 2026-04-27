@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     turso_auth_token: str = ""
     cors_origins: str = "*"
     monthly_cost_cap_usd: float = 20.0
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_redirect_uri: str = "https://geocc-backend.onrender.com/integrations/google/oauth/callback"
 
     @property
     def cors_list(self) -> list[str]:

@@ -20,6 +20,7 @@ from app.routers import (
     settings as settings_router,
     monitor as monitor_router,
     intelligence as intelligence_router,
+    integrations as integrations_router,
 )
 
 
@@ -61,3 +62,4 @@ app.include_router(tasks.router)
 app.include_router(settings_router.router)
 app.include_router(monitor_router.router)
 app.include_router(intelligence_router.router)
+app.include_router(integrations_router.router)

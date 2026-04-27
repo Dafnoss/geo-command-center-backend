@@ -267,6 +267,62 @@ def generate_recommendations(*, db: Session, request: schemas.GenerateRequest) -
     return saved
 
 
+def _tokens(text: str) -> set[str]:
+    raw = "".join(ch.lower() if ch.isalnum() else " " for ch in (text or ""))
+    stop = {
+        "what", "which", "best", "for", "the", "and", "with", "without", "how",
+        "additive", "additives", "agent", "agents", "polymer", "polymers",
+        "conductive", "anti", "static", "esd", "to", "in", "of", "a", "an",
+    }
+    return {t for t in raw.split() if len(t) > 2 and t not in stop}
+
+
+def _matching_search_metrics(db: Session, prompts: list[models.Prompt], limit: int = 8) -> list[models.GoogleSearchMetric]:
+    wanted = set()
+    for prompt in prompts:
+        wanted |= _tokens(prompt.prompt_text)
+        wanted |= _tokens(prompt.topic_cluster)
+    if not wanted:
+        return []
+    rows = (
+        db.query(models.GoogleSearchMetric)
+        .order_by(models.GoogleSearchMetric.impressions.desc())
+        .limit(500)
+        .all()
+    )
+    matches = []
+    for row in rows:
+        hay = _tokens(row.query) | _tokens(row.page)
+        if wanted & hay:
+            matches.append(row)
+        if len(matches) >= limit:
+            break
+    return matches
+
+
+def _matching_analytics_metrics(db: Session, prompts: list[models.Prompt], limit: int = 5) -> list[models.GoogleAnalyticsMetric]:
+    wanted = set()
+    for prompt in prompts:
+        wanted |= _tokens(prompt.prompt_text)
+        wanted |= _tokens(prompt.topic_cluster)
+    if not wanted:
+        return []
+    rows = (
+        db.query(models.GoogleAnalyticsMetric)
+        .order_by(models.GoogleAnalyticsMetric.sessions.desc())
+        .limit(500)
+        .all()
+    )
+    matches = []
+    for row in rows:
+        hay = _tokens(row.page_path) | _tokens(row.page_title)
+        if wanted & hay:
+            matches.append(row)
+        if len(matches) >= limit:
+            break
+    return matches
+
+
 def process_prompt_evidence_recommendations(db: Session) -> dict:
     """Create consolidated recommendations from all monitored prompt evidence.
 
@@ -326,11 +382,22 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
         top_prompt = sorted(prompts, key=lambda p: (p.business_priority, p.answer_quality_score), reverse=True)[0]
         competitors = Counter(c for p in prompts for c in (p.competitors_mentioned or []))
         sources = Counter(s for p in prompts for s in (p.cited_sources or []))
+        search_metrics = _matching_search_metrics(db, prompts)
+        analytics_metrics = _matching_analytics_metrics(db, prompts)
+        search_impressions = sum(m.impressions for m in search_metrics)
+        search_clicks = sum(m.clicks for m in search_metrics)
+        avg_position = (
+            round(sum(m.avg_position * max(m.impressions, 1) for m in search_metrics) / sum(max(m.impressions, 1) for m in search_metrics), 1)
+            if search_metrics else 0
+        )
+        ga_sessions = sum(m.sessions for m in analytics_metrics)
 
         visibility_rate = round(len(visible) / total * 100) if total else 0
         citation_rate = round(len(cited) / total * 100) if total else 0
         competitor_rate = round(len(risks) / total * 100) if total else 0
-        priority_score = min(95, 45 + len(gaps) * 6 + len(risks) * 4 + max(p.business_priority for p in prompts) * 5)
+        search_boost = 8 if search_impressions >= 1000 else (4 if search_impressions >= 100 else 0)
+        traffic_boost = 5 if ga_sessions >= 100 else (2 if ga_sessions > 0 else 0)
+        priority_score = min(98, 45 + len(gaps) * 6 + len(risks) * 4 + max(p.business_priority for p in prompts) * 5 + search_boost + traffic_boost)
 
         if risks and competitors:
             rec_type = "Add comparison table"
@@ -356,6 +423,16 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
             evidence.append("Top competitors appearing: " + ", ".join(c for c, _ in competitors.most_common(4)) + ".")
         if sources:
             evidence.append("LLM-cited sources include: " + ", ".join(s for s, _ in sources.most_common(4)) + ".")
+        if search_metrics:
+            evidence.append(
+                f"Google Search Console shows {search_impressions:,} impressions and {search_clicks:,} clicks for related queries "
+                f"(avg position {avg_position})."
+            )
+            top_queries = ", ".join(m.query for m in search_metrics[:3] if m.query)
+            if top_queries:
+                evidence.append("Related Google queries: " + top_queries + ".")
+        if analytics_metrics:
+            evidence.append(f"GA4 shows {ga_sessions:,} sessions on related pages in the synced range.")
 
         actions = [
             f"Create or update one authoritative {cluster} page that directly answers the highest-priority prompts.",
@@ -364,6 +441,10 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
             "Add quotable technical claims, application examples, and source-style references that LLMs can reuse.",
             "Link the page from relevant OCSiAl/TUBALL pages and rerun this cluster after publishing.",
         ]
+        if search_metrics:
+            actions.insert(1, "Use the related Search Console queries as H2/FAQ wording so the page captures existing demand.")
+        if analytics_metrics:
+            actions.append("Update the already-trafficked GA4 pages first if they match this cluster; they are faster to turn into citation assets.")
         acceptance = [
             "Page directly answers at least five monitored prompts from this cluster.",
             "Includes OCSiAl, TUBALL, owned-domain references, and comparison language.",
@@ -379,6 +460,10 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
             "owned_citation_rate": citation_rate,
             "visibility_rate": visibility_rate,
             "competitor_rate": competitor_rate,
+            "gsc_impressions": search_impressions,
+            "gsc_clicks": search_clicks,
+            "gsc_avg_position": avg_position,
+            "ga4_sessions": ga_sessions,
         }
 
         existing = None

@@ -165,6 +165,57 @@ class SeoMetricOut(ORMModel):
     conversions: int
 
 
+# ---------------- Google integrations ----------------
+class GoogleConnectorStatus(BaseModel):
+    configured: bool
+    connected: bool
+    status: str
+    account_label: str = ""
+    scopes: List[str] = []
+    last_sync_at: Optional[datetime] = None
+    search_console_sites: List[str] = []
+    ga4_property_id: str = ""
+    search_rows: int = 0
+    analytics_rows: int = 0
+
+
+class GoogleAuthUrlOut(BaseModel):
+    authorization_url: str
+
+
+class GoogleSyncOut(BaseModel):
+    ok: bool
+    search_console_sites: List[str] = []
+    search_rows: int = 0
+    analytics_rows: int = 0
+    warnings: List[str] = []
+
+
+class GoogleSearchMetricOut(ORMModel):
+    metric_id: str
+    site_url: str
+    date_start: date
+    date_end: date
+    query: str
+    page: str
+    clicks: int
+    impressions: int
+    ctr: float
+    avg_position: float
+
+
+class GoogleAnalyticsMetricOut(ORMModel):
+    metric_id: str
+    property_id: str
+    date_start: date
+    date_end: date
+    page_path: str
+    page_title: str
+    active_users: int
+    sessions: int
+    conversions: float
+
+
 # ---------------- Recommendation ----------------
 class RecommendationOut(ORMModel):
     recommendation_id: str
