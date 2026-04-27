@@ -8,6 +8,7 @@ Google consent. Sync is explicit; no Google data is read until /sync is called.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -34,6 +35,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/webmasters.readonly",
     "https://www.googleapis.com/auth/analytics.readonly",
 ]
+
+# Google can return a superset of scopes if the user has previous grants. Do not
+# fail token exchange on that bookkeeping difference; we still only call the
+# read-only APIs this connector uses.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 
 def _setting(db: Session, key: str, default: str = "") -> str:
@@ -256,7 +262,6 @@ def google_auth_url(db: Session = Depends(get_db)):
     db.commit()
     authorization_url, _ = _flow(state=state).authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
         prompt="consent select_account",
     )
     return schemas.GoogleAuthUrlOut(authorization_url=authorization_url)
