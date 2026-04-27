@@ -335,7 +335,11 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
     rejected_stale = 0
     for rec in db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all():
         meta = rec.score_breakdown or {}
-        if meta.get("source") not in ("prompt_evidence", "cluster_evidence"):
+        if meta.get("source") == "prompt_evidence":
+            rec.status = "Stale"
+            rejected_stale += 1
+            continue
+        if meta.get("source") != "cluster_evidence":
             continue
         if meta.get("cluster") not in active_clusters:
             rec.status = "Stale"
@@ -364,7 +368,7 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
         existing = None
         for rec in db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all():
             rec_meta = rec.score_breakdown or {}
-            if rec_meta.get("source") in ("prompt_evidence", "cluster_evidence") and rec_meta.get("cluster") == cluster:
+            if rec_meta.get("source") == "cluster_evidence" and rec_meta.get("cluster") == cluster:
                 existing = rec
                 break
 
