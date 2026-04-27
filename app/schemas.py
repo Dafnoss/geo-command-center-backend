@@ -175,6 +175,7 @@ class GoogleConnectorStatus(BaseModel):
     last_sync_at: Optional[datetime] = None
     search_console_sites: List[str] = []
     ga4_property_id: str = ""
+    ga4_properties: List[dict] = []
     search_rows: int = 0
     analytics_rows: int = 0
 

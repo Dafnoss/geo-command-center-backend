@@ -155,6 +155,39 @@ def _list_sites(creds: Credentials) -> list[str]:
     return [s.get("siteUrl", "") for s in data.get("siteEntry", []) if s.get("siteUrl")]
 
 
+def _list_ga4_properties(creds: Credentials) -> list[dict]:
+    data = _authed_request(creds, "GET", "https://analyticsadmin.googleapis.com/v1beta/accountSummaries")
+    props: list[dict] = []
+    for account in data.get("accountSummaries", []):
+        account_name = account.get("displayName", "")
+        for prop in account.get("propertySummaries", []) or []:
+            prop_name = prop.get("property", "")
+            if not prop_name:
+                continue
+            props.append({
+                "property": prop_name,
+                "property_id": prop_name.replace("properties/", ""),
+                "display_name": prop.get("displayName", ""),
+                "account": account_name,
+            })
+    return props
+
+
+def _wanted_ga4_properties(db: Session, available: list[dict]) -> list[dict]:
+    configured = split_csv(_setting(db, "google_ga4_property_id", ""))
+    configured += split_csv(_setting(db, "google_ga4_property_ids", ""))
+    if configured:
+        wanted_ids = {p.replace("properties/", "").strip() for p in configured if p.strip()}
+        return [p for p in available if p["property_id"] in wanted_ids or p["property"] in configured]
+    owned = _owned_domains(db)
+    selected = []
+    for prop in available:
+        hay = " ".join([prop.get("display_name", ""), prop.get("account", "")]).lower()
+        if any(d.split(".")[0] in hay for d in owned) or any(name in hay for name in ("ocsial", "tuball")):
+            selected.append(prop)
+    return selected or available
+
+
 def _sync_search_console(db: Session, start: date, end: date) -> tuple[list[str], int]:
     db.query(models.GoogleSearchMetric).delete()
     all_sites: list[str] = []
@@ -195,11 +228,6 @@ def _sync_search_console(db: Session, start: date, end: date) -> tuple[list[str]
 
 
 def _sync_analytics(db: Session, start: date, end: date) -> tuple[str, int, list[str]]:
-    property_id = _setting(db, "google_ga4_property_id", "").strip()
-    if not property_id:
-        return "", 0, ["GA4 skipped: set google_ga4_property_id in Settings."]
-    prop = property_id.replace("properties/", "")
-    url = f"https://analyticsdata.googleapis.com/v1beta/properties/{prop}:runReport"
     body = {
         "dateRanges": [{"startDate": start.isoformat(), "endDate": end.isoformat()}],
         "dimensions": [{"name": "pagePath"}, {"name": "pageTitle"}],
@@ -207,40 +235,62 @@ def _sync_analytics(db: Session, start: date, end: date) -> tuple[str, int, list
         "limit": 500,
     }
     db.query(models.GoogleAnalyticsMetric).delete()
-    data = None
+    synced_props: list[str] = []
+    all_available: list[dict] = []
+    inserted = 0
     errors: list[str] = []
     for account in _accounts(db):
         creds = _credentials_for_account(db, account)
         try:
-            data = _authed_request(creds, "POST", url, body)
-            break
+            props = _wanted_ga4_properties(db, _list_ga4_properties(creds))
+            all_available.extend(props)
+            for prop_row in props:
+                prop = prop_row["property_id"]
+                url = f"https://analyticsdata.googleapis.com/v1beta/properties/{prop}:runReport"
+                try:
+                    data = _authed_request(creds, "POST", url, body)
+                except HTTPException as exc:
+                    errors.append(f"{account.account_label}/{prop}: {exc.detail}")
+                    continue
+                synced_props.append(prop)
+                for row in data.get("rows", []):
+                    dims = [v.get("value", "") for v in row.get("dimensionValues", [])]
+                    mets = [v.get("value", "0") for v in row.get("metricValues", [])]
+                    db.add(models.GoogleAnalyticsMetric(
+                        metric_id=f"GA4-{uuid.uuid4().hex[:12]}",
+                        property_id=prop,
+                        date_start=start,
+                        date_end=end,
+                        page_path=dims[0] if len(dims) > 0 else "",
+                        page_title=dims[1] if len(dims) > 1 else "",
+                        active_users=int(float(mets[0])) if len(mets) > 0 else 0,
+                        sessions=int(float(mets[1])) if len(mets) > 1 else 0,
+                        conversions=float(mets[2]) if len(mets) > 2 else 0.0,
+                    ))
+                    inserted += 1
         except HTTPException as exc:
             errors.append(f"{account.account_label}: {exc.detail}")
-    if data is None:
-        return prop, 0, ["GA4 sync failed for all connected Google accounts. " + " | ".join(errors)[:500]]
-    inserted = 0
-    for row in data.get("rows", []):
-        dims = [v.get("value", "") for v in row.get("dimensionValues", [])]
-        mets = [v.get("value", "0") for v in row.get("metricValues", [])]
-        db.add(models.GoogleAnalyticsMetric(
-            metric_id=f"GA4-{uuid.uuid4().hex[:12]}",
-            property_id=prop,
-            date_start=start,
-            date_end=end,
-            page_path=dims[0] if len(dims) > 0 else "",
-            page_title=dims[1] if len(dims) > 1 else "",
-            active_users=int(float(mets[0])) if len(mets) > 0 else 0,
-            sessions=int(float(mets[1])) if len(mets) > 1 else 0,
-            conversions=float(mets[2]) if len(mets) > 2 else 0.0,
-        ))
-        inserted += 1
-    return prop, inserted, []
+    if synced_props:
+        _set_setting(db, "google_ga4_property_id", ",".join(sorted(set(synced_props))), "GA4 property IDs synced.")
+        return ",".join(sorted(set(synced_props))), inserted, errors[:3]
+    if all_available:
+        return "", 0, ["GA4 properties were discovered but no data was synced. " + " | ".join(errors)[:500]]
+    return "", 0, ["GA4 skipped: no GA4 properties discovered for connected accounts. " + " | ".join(errors)[:500]]
 
 
 @router.get("/status", response_model=schemas.GoogleConnectorStatus)
 def google_status(db: Session = Depends(get_db)):
     accounts = _accounts(db)
     last_sync = max((a.last_sync_at for a in accounts if a.last_sync_at), default=None)
+    ga4_props: list[dict] = []
+    for account in accounts:
+        try:
+            creds = _credentials_for_account(db, account)
+            for prop in _list_ga4_properties(creds):
+                prop["account_email"] = account.account_label
+                ga4_props.append(prop)
+        except HTTPException:
+            continue
     return schemas.GoogleConnectorStatus(
         configured=_configured(),
         connected=bool(accounts),
@@ -250,6 +300,7 @@ def google_status(db: Session = Depends(get_db)):
         last_sync_at=last_sync,
         search_console_sites=split_csv(_setting(db, "google_search_console_sites", "")),
         ga4_property_id=_setting(db, "google_ga4_property_id", ""),
+        ga4_properties=ga4_props,
         search_rows=db.query(models.GoogleSearchMetric).count(),
         analytics_rows=db.query(models.GoogleAnalyticsMetric).count(),
     )
