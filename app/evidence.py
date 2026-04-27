@@ -12,7 +12,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Iterable
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from sqlalchemy.orm import Session
 
@@ -144,7 +144,8 @@ def _best_existing_page(gsc_rows: list[models.GoogleSearchMetric], ga4_rows: lis
     for row in gsc_rows:
         if not row.page:
             continue
-        p = pages.setdefault(row.page, {
+        key = _page_match_key(row.page)
+        p = pages.setdefault(key, {
             "url": row.page,
             "title": "",
             "gsc_impressions": 0,
@@ -160,7 +161,7 @@ def _best_existing_page(gsc_rows: list[models.GoogleSearchMetric], ga4_rows: lis
         p["gsc_avg_position"] += (row.avg_position or 0) * weight
         p["_pos_weight"] += weight
     for row in ga4_rows:
-        key = row.page_path or row.page_title or row.metric_id
+        key = _page_match_key(row.page_path) or _page_match_key(row.page_title) or row.metric_id
         p = pages.setdefault(key, {
             "url": row.page_path,
             "title": row.page_title,
@@ -171,6 +172,8 @@ def _best_existing_page(gsc_rows: list[models.GoogleSearchMetric], ga4_rows: lis
             "ga4_users": 0,
             "_pos_weight": 0,
         })
+        if not p.get("url"):
+            p["url"] = row.page_path
         p["title"] = p.get("title") or row.page_title
         p["ga4_sessions"] += row.sessions or 0
         p["ga4_users"] += row.active_users or 0
@@ -181,6 +184,18 @@ def _best_existing_page(gsc_rows: list[models.GoogleSearchMetric], ga4_rows: lis
             p["gsc_avg_position"] = round(p["gsc_avg_position"] / p["_pos_weight"], 1)
         p.pop("_pos_weight", None)
     return max(pages.values(), key=lambda p: (p["gsc_impressions"] >= 100 and 5 <= (p["gsc_avg_position"] or 99) <= 20, p["ga4_sessions"], p["gsc_impressions"]))
+
+
+def _page_match_key(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    path = parsed.path if parsed.scheme and parsed.netloc else raw
+    path = unquote(path).strip().lower()
+    path = re.sub(r"[?#].*$", "", path)
+    path = re.sub(r"/+", "/", path).rstrip("/")
+    return path or "/"
 
 
 def _search_demand_score(impressions: int, clicks: int, avg_position: float) -> int:
