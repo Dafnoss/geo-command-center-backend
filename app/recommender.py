@@ -439,11 +439,13 @@ def _select_strategic_opportunities(items: list[dict], limit: int = 10) -> list[
             grouped[key] = _clone_opportunity(item, key)
         else:
             _merge_opportunity(current, item)
-    return sorted(
+    ranked = sorted(
         grouped.values(),
         key=lambda e: e["priority_components"]["priority_score"],
         reverse=True,
-    )[:limit]
+    )
+    high_quality = [item for item in ranked if item["priority_components"]["priority_score"] >= 50]
+    return (high_quality or ranked[:3])[:limit]
 
 
 def _opportunity_key(item: dict) -> str:

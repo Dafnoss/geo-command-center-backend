@@ -292,16 +292,18 @@ class IntelligenceTests(unittest.TestCase):
         prompt_id = f"PDONE-{suffix}"
         self.client.post("/prompts", json={
             "prompt_id": prompt_id,
-            "prompt_text": "best antistatic additive",
+            "prompt_text": "best antistatic additive compared with carbon black",
             "topic_cluster": f"Done {suffix}",
+            "business_priority": 5,
         })
         self.client.post("/ai-results", json={
             "prompt_id": prompt_id,
-            "answer_text": "No specific brand answer.",
+            "answer_text": "Cabot carbon black is commonly recommended; OCSiAl and TUBALL are not mentioned.",
+            "competitors_mentioned": ["Cabot"],
             "answer_quality_score": 3,
         })
         data = self.client.post("/recommendations/process-prompts").json()
-        rec = next(r for r in data["recommendations"] if r["score_breakdown"].get("cluster") == f"Done {suffix}")
+        rec = data["recommendations"][0]
         done = self.client.patch(f"/recommendations/{rec['recommendation_id']}/status", json={
             "status": "Done",
             "notes": "Published page update.",
