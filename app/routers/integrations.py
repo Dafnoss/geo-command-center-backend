@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -29,6 +29,8 @@ from app.visibility import split_csv
 router = APIRouter(prefix="/integrations/google", tags=["integrations"])
 
 SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/webmasters.readonly",
     "https://www.googleapis.com/auth/analytics.readonly",
 ]
@@ -78,12 +80,20 @@ def _flow(state: str | None = None) -> Flow:
     return flow
 
 
+def _accounts(db: Session) -> list[models.ConnectorAccount]:
+    return (
+        db.query(models.ConnectorAccount)
+        .filter_by(provider="google")
+        .filter(models.ConnectorAccount.status == "connected")
+        .all()
+    )
+
+
 def _account(db: Session) -> models.ConnectorAccount | None:
-    return db.query(models.ConnectorAccount).filter_by(provider="google").one_or_none()
+    return _accounts(db)[0] if _accounts(db) else None
 
 
-def _credentials(db: Session) -> Credentials:
-    account = _account(db)
+def _credentials_for_account(db: Session, account: models.ConnectorAccount) -> Credentials:
     if not account or not account.token_json:
         raise HTTPException(409, "Google is not connected.")
     creds = Credentials.from_authorized_user_info(account.token_json, scopes=SCOPES)
@@ -93,12 +103,11 @@ def _credentials(db: Session) -> Credentials:
         account.updated_at = datetime.utcnow()
         db.commit()
     if not creds.valid:
-        raise HTTPException(409, "Google token is not valid. Reconnect Google.")
+        raise HTTPException(409, f"Google token is not valid for {account.account_label}. Reconnect Google.")
     return creds
 
 
-def _authed_request(db: Session, method: str, url: str, body: dict | None = None) -> dict:
-    creds = _credentials(db)
+def _authed_request(creds: Credentials, method: str, url: str, body: dict | None = None) -> dict:
     creds.before_request(Request(), method, url, {})
     import requests
 
@@ -135,43 +144,48 @@ def _wanted_sites(db: Session, available: list[str]) -> list[str]:
     return selected or available[:2]
 
 
-def _list_sites(db: Session) -> list[str]:
-    data = _authed_request(db, "GET", "https://www.googleapis.com/webmasters/v3/sites")
+def _list_sites(creds: Credentials) -> list[str]:
+    data = _authed_request(creds, "GET", "https://www.googleapis.com/webmasters/v3/sites")
     return [s.get("siteUrl", "") for s in data.get("siteEntry", []) if s.get("siteUrl")]
 
 
 def _sync_search_console(db: Session, start: date, end: date) -> tuple[list[str], int]:
-    available = _list_sites(db)
-    sites = _wanted_sites(db, available)
     db.query(models.GoogleSearchMetric).delete()
+    all_sites: list[str] = []
     rows_inserted = 0
-    for site in sites:
-        url = "https://www.googleapis.com/webmasters/v3/sites/" + quote(site, safe="") + "/searchAnalytics/query"
-        body = {
-            "startDate": start.isoformat(),
-            "endDate": end.isoformat(),
-            "dimensions": ["query", "page"],
-            "rowLimit": 500,
-            "startRow": 0,
-        }
-        data = _authed_request(db, "POST", url, body)
-        for row in data.get("rows", []):
-            keys = row.get("keys") or ["", ""]
-            db.add(models.GoogleSearchMetric(
-                metric_id=f"GSC-{uuid.uuid4().hex[:12]}",
-                site_url=site,
-                date_start=start,
-                date_end=end,
-                query=keys[0] if len(keys) > 0 else "",
-                page=keys[1] if len(keys) > 1 else "",
-                clicks=int(row.get("clicks") or 0),
-                impressions=int(row.get("impressions") or 0),
-                ctr=float(row.get("ctr") or 0),
-                avg_position=float(row.get("position") or 0),
-            ))
-            rows_inserted += 1
-    _set_setting(db, "google_search_console_sites", ",".join(sites), "GSC site URLs synced.")
-    return sites, rows_inserted
+    for account in _accounts(db):
+        creds = _credentials_for_account(db, account)
+        available = _list_sites(creds)
+        sites = _wanted_sites(db, available)
+        for site in sites:
+            if site not in all_sites:
+                all_sites.append(site)
+            url = "https://www.googleapis.com/webmasters/v3/sites/" + quote(site, safe="") + "/searchAnalytics/query"
+            body = {
+                "startDate": start.isoformat(),
+                "endDate": end.isoformat(),
+                "dimensions": ["query", "page"],
+                "rowLimit": 500,
+                "startRow": 0,
+            }
+            data = _authed_request(creds, "POST", url, body)
+            for row in data.get("rows", []):
+                keys = row.get("keys") or ["", ""]
+                db.add(models.GoogleSearchMetric(
+                    metric_id=f"GSC-{uuid.uuid4().hex[:12]}",
+                    site_url=site,
+                    date_start=start,
+                    date_end=end,
+                    query=keys[0] if len(keys) > 0 else "",
+                    page=keys[1] if len(keys) > 1 else "",
+                    clicks=int(row.get("clicks") or 0),
+                    impressions=int(row.get("impressions") or 0),
+                    ctr=float(row.get("ctr") or 0),
+                    avg_position=float(row.get("position") or 0),
+                ))
+                rows_inserted += 1
+    _set_setting(db, "google_search_console_sites", ",".join(all_sites), "GSC site URLs synced.")
+    return all_sites, rows_inserted
 
 
 def _sync_analytics(db: Session, start: date, end: date) -> tuple[str, int, list[str]]:
@@ -186,8 +200,18 @@ def _sync_analytics(db: Session, start: date, end: date) -> tuple[str, int, list
         "metrics": [{"name": "activeUsers"}, {"name": "sessions"}, {"name": "conversions"}],
         "limit": 500,
     }
-    data = _authed_request(db, "POST", url, body)
     db.query(models.GoogleAnalyticsMetric).delete()
+    data = None
+    errors: list[str] = []
+    for account in _accounts(db):
+        creds = _credentials_for_account(db, account)
+        try:
+            data = _authed_request(creds, "POST", url, body)
+            break
+        except HTTPException as exc:
+            errors.append(f"{account.account_label}: {exc.detail}")
+    if data is None:
+        return prop, 0, ["GA4 sync failed for all connected Google accounts. " + " | ".join(errors)[:500]]
     inserted = 0
     for row in data.get("rows", []):
         dims = [v.get("value", "") for v in row.get("dimensionValues", [])]
@@ -209,14 +233,15 @@ def _sync_analytics(db: Session, start: date, end: date) -> tuple[str, int, list
 
 @router.get("/status", response_model=schemas.GoogleConnectorStatus)
 def google_status(db: Session = Depends(get_db)):
-    account = _account(db)
+    accounts = _accounts(db)
+    last_sync = max((a.last_sync_at for a in accounts if a.last_sync_at), default=None)
     return schemas.GoogleConnectorStatus(
         configured=_configured(),
-        connected=bool(account and account.status == "connected"),
-        status=account.status if account else "disconnected",
-        account_label=account.account_label if account else "",
-        scopes=account.scopes if account else [],
-        last_sync_at=account.last_sync_at if account else None,
+        connected=bool(accounts),
+        status="connected" if accounts else "disconnected",
+        account_label=", ".join(a.account_label for a in accounts),
+        scopes=SCOPES if accounts else [],
+        last_sync_at=last_sync,
         search_console_sites=split_csv(_setting(db, "google_search_console_sites", "")),
         ga4_property_id=_setting(db, "google_ga4_property_id", ""),
         search_rows=db.query(models.GoogleSearchMetric).count(),
@@ -232,7 +257,7 @@ def google_auth_url(db: Session = Depends(get_db)):
     authorization_url, _ = _flow(state=state).authorization_url(
         access_type="offline",
         include_granted_scopes="true",
-        prompt="consent",
+        prompt="consent select_account",
     )
     return schemas.GoogleAuthUrlOut(authorization_url=authorization_url)
 
@@ -246,14 +271,17 @@ def google_callback(code: str = "", state: str = "", db: Session = Depends(get_d
     flow.fetch_token(code=code)
     creds = flow.credentials
     token_json = json.loads(creds.to_json())
-    account = _account(db)
+    info = _authed_request(creds, "GET", "https://www.googleapis.com/oauth2/v2/userinfo")
+    email = (info.get("email") or f"google-{uuid.uuid4().hex[:8]}").lower()
+    account = db.query(models.ConnectorAccount).filter_by(connector_id=f"google:{email}").one_or_none()
     if not account:
         account = models.ConnectorAccount(
-            connector_id="google",
+            connector_id=f"google:{email}",
             provider="google",
-            account_label="Google Search Console + GA4",
+            account_label=email,
         )
         db.add(account)
+    account.account_label = email
     account.scopes = SCOPES
     account.token_json = token_json
     account.status = "connected"
@@ -269,8 +297,7 @@ def google_callback(code: str = "", state: str = "", db: Session = Depends(get_d
 
 @router.post("/disconnect")
 def google_disconnect(db: Session = Depends(get_db)):
-    account = _account(db)
-    if account:
+    for account in _accounts(db):
         account.status = "disconnected"
         account.token_json = {}
         account.updated_at = datetime.utcnow()
@@ -286,8 +313,7 @@ def google_sync(db: Session = Depends(get_db)):
     sites, search_rows = _sync_search_console(db, start, end)
     _, analytics_rows, ga_warnings = _sync_analytics(db, start, end)
     warnings.extend(ga_warnings)
-    account = _account(db)
-    if account:
+    for account in _accounts(db):
         account.last_sync_at = datetime.utcnow()
         account.updated_at = datetime.utcnow()
     db.commit()
