@@ -330,8 +330,9 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
         e for e in all_evidence
         if (e["gap_count"] + e["risk_count"]) > 0
     ]
+    selected_evidence = weak_evidence[:10]
 
-    active_clusters = {e["cluster"] for e in weak_evidence}
+    active_clusters = {e["cluster"] for e in selected_evidence}
     rejected_stale = 0
     for rec in db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all():
         meta = rec.score_breakdown or {}
@@ -349,7 +350,7 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
     updated = 0
     output: list[models.Recommendation] = []
 
-    for item in weak_evidence[:10]:
+    for item in selected_evidence:
         cluster = item["cluster"]
         prompt_ids = item["linked_prompt_ids"]
         rec_type = item["opportunity_type"]
@@ -417,7 +418,7 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
 
     return {
         "considered_prompts": sum(e["gap_count"] + e["risk_count"] for e in weak_evidence),
-        "clusters_processed": len(weak_evidence[:10]),
+        "clusters_processed": len(selected_evidence),
         "created": created,
         "updated": updated,
         "rejected_stale": rejected_stale,
