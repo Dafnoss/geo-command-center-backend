@@ -334,18 +334,19 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
 
     active_keys = {e["recommendation_key"] for e in selected_evidence}
     rejected_stale = 0
+    seen_active_keys: set[str] = set()
     for rec in db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all():
         meta = rec.score_breakdown or {}
-        if meta.get("source") == "prompt_evidence":
+        if meta.get("source") != "cluster_evidence":
             rec.status = "Stale"
             rejected_stale += 1
-            continue
-        if meta.get("source") != "cluster_evidence":
             continue
         rec_key = meta.get("recommendation_key") or _legacy_recommendation_key(meta)
-        if rec_key not in active_keys:
+        if rec_key not in active_keys or rec_key in seen_active_keys:
             rec.status = "Stale"
             rejected_stale += 1
+            continue
+        seen_active_keys.add(rec_key)
 
     created = 0
     updated = 0
