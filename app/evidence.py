@@ -12,6 +12,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Iterable
+from urllib.parse import unquote
 
 from sqlalchemy.orm import Session
 
@@ -232,30 +233,52 @@ def _opportunity_type(evidence: dict) -> str:
 
 
 def _opportunity_title(opportunity_type: str, cluster: str, best_page: dict | None) -> str:
+    cluster_label = _human_label(cluster)
     if opportunity_type == "Upgrade Existing Page" and best_page:
         label = _page_label(best_page)
-        return f"Upgrade {label} for {cluster} AI visibility"
+        return f"Upgrade page: {label}"
     if opportunity_type == "Add Comparison Section":
-        return f"Add comparison section for {cluster} competitors"
+        return f"Add competitor comparison for {cluster_label}"
     if opportunity_type == "Add FAQ / Buyer Questions":
-        return f"Add buyer-question FAQ coverage for {cluster}"
+        return f"Add buyer-question FAQ for {cluster_label}"
     if opportunity_type == "Add Citation Proof":
-        return f"Make OCSiAl/TUBALL citable for {cluster}"
+        return f"Make OCSiAl/TUBALL citable for {cluster_label}"
     if opportunity_type == "Improve Internal Linking":
-        return f"Strengthen internal authority links for {cluster}"
+        return f"Strengthen internal links for {cluster_label}"
     if opportunity_type == "Defend Substitute Positioning":
-        return f"Position TUBALL against substitute materials in {cluster}"
-    return f"Create source page for {cluster}"
+        return f"Clarify TUBALL vs substitutes for {cluster_label}"
+    return f"Create source page for {cluster_label}"
 
 
 def _page_label(page: dict) -> str:
     title = (page.get("title") or "").strip()
     if title:
-        return title[:60]
+        return _human_label(title)[:72]
     url = (page.get("url") or "").strip().rstrip("/")
     if not url:
         return "existing page"
-    return url.split("/")[-1].replace("-", " ")[:60] or url
+    slug = unquote(url.split("/")[-1]).replace("-", " ").replace("_", " ")
+    return _human_label(slug)[:72] or url
+
+
+def _human_label(value: str) -> str:
+    raw = re.sub(r"\s+", " ", (value or "").strip())
+    if not raw:
+        return raw
+    acronyms = {"ai", "geo", "seo", "gsc", "ga4", "esd", "faq", "url", "cnt", "swcnt", "mwcnt", "pa", "pc", "abs", "tpu", "epdm", "fkm"}
+    small = {"and", "or", "for", "to", "of", "in", "vs", "with", "without", "the", "a", "an"}
+    words = []
+    for i, word in enumerate(raw.replace("/", " / ").split()):
+        lower = word.lower()
+        if word == "/":
+            words.append("/")
+        elif lower in acronyms:
+            words.append(lower.upper())
+        elif i > 0 and lower in small:
+            words.append(lower)
+        else:
+            words.append(lower[:1].upper() + lower[1:])
+    return " ".join(words).replace(" / ", "/")
 
 
 def build_cluster_evidence(db: Session) -> list[dict]:
