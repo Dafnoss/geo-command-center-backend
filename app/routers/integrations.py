@@ -140,7 +140,7 @@ def _owned_domains(db: Session) -> list[str]:
 def _wanted_sites(db: Session, available: list[str]) -> list[str]:
     configured = split_csv(_setting(db, "google_search_console_sites", ""))
     if configured:
-        return [s for s in configured if s in available or s.startswith(("http://", "https://", "sc-domain:"))]
+        return [s for s in configured if s in available]
     owned = _owned_domains(db)
     selected = []
     for site in available:
@@ -188,14 +188,18 @@ def _wanted_ga4_properties(db: Session, available: list[dict]) -> list[dict]:
     return selected or available
 
 
-def _sync_search_console(db: Session, start: date, end: date) -> tuple[list[str], int]:
+def _sync_search_console(db: Session, start: date, end: date) -> tuple[list[str], int, list[str]]:
     db.query(models.GoogleSearchMetric).delete()
     all_sites: list[str] = []
     rows_inserted = 0
+    warnings: list[str] = []
     for account in _accounts(db):
         creds = _credentials_for_account(db, account)
         available = _list_sites(creds)
         sites = _wanted_sites(db, available)
+        if not sites:
+            warnings.append(f"GSC skipped for {account.account_label}: none of the configured sites are available to this account.")
+            continue
         for site in sites:
             if site not in all_sites:
                 all_sites.append(site)
@@ -207,7 +211,11 @@ def _sync_search_console(db: Session, start: date, end: date) -> tuple[list[str]
                 "rowLimit": 500,
                 "startRow": 0,
             }
-            data = _authed_request(creds, "POST", url, body)
+            try:
+                data = _authed_request(creds, "POST", url, body)
+            except HTTPException as exc:
+                warnings.append(f"GSC skipped {site} for {account.account_label}: {exc.detail}")
+                continue
             for row in data.get("rows", []):
                 keys = row.get("keys") or ["", ""]
                 db.add(models.GoogleSearchMetric(
@@ -224,7 +232,7 @@ def _sync_search_console(db: Session, start: date, end: date) -> tuple[list[str]
                 ))
                 rows_inserted += 1
     _set_setting(db, "google_search_console_sites", ",".join(all_sites), "GSC site URLs synced.")
-    return all_sites, rows_inserted
+    return all_sites, rows_inserted, warnings[:5]
 
 
 def _sync_analytics(db: Session, start: date, end: date) -> tuple[str, int, list[str]]:
@@ -366,7 +374,8 @@ def google_sync(db: Session = Depends(get_db)):
     end = date.today() - timedelta(days=2)
     start = end - timedelta(days=27)
     warnings: list[str] = []
-    sites, search_rows = _sync_search_console(db, start, end)
+    sites, search_rows, gsc_warnings = _sync_search_console(db, start, end)
+    warnings.extend(gsc_warnings)
     _, analytics_rows, ga_warnings = _sync_analytics(db, start, end)
     warnings.extend(ga_warnings)
     for account in _accounts(db):
