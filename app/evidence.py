@@ -31,6 +31,23 @@ SUBSTITUTE_TERMS = {
     "metal filler",
 }
 
+GENERIC_TERMS = {
+    "additive", "additives", "carbon", "nanotube", "nanotubes", "graphene",
+    "material", "materials", "polymer", "polymers", "best", "top",
+    "supplier", "suppliers", "application", "applications", "conductive",
+    "conductivity", "compound", "compounds", "industrial",
+}
+
+DOMAIN_TERMS = {
+    "antistatic", "anti-static", "static", "esd", "coating", "coatings",
+    "paint", "paints", "rubber", "elastomer", "elastomers", "silicone",
+    "tpu", "epdm", "fkm", "plastic", "plastics", "polycarbonate", "abs",
+    "polyurethane", "epoxy", "battery", "batteries", "regulation",
+    "regulatory", "safety", "toxicity", "reach", "supplier", "vendor",
+    "procurement", "masterbatch", "flooring", "transparent", "colored",
+    "dosage", "loading", "viscosity",
+}
+
 TECHNICAL_SOURCE_HINTS = (
     "science",
     "nature",
@@ -58,14 +75,16 @@ class EvidenceWeights:
 
     @property
     def priority_score(self) -> int:
-        return min(100, round(
+        raw = round(
             self.gap_severity * 0.30
             + self.competitor_pressure * 0.20
             + self.search_demand * 0.20
             + self.existing_page_leverage * 0.15
             + self.business_priority * 0.10
             + self.confidence * 0.05
-        ))
+        )
+        # Stretch mid-range values so priority bands are useful in the UI.
+        return min(100, max(0, round((raw - 45) * 1.55 + 45)))
 
 
 def _setting(db: Session, key: str, default: str = "") -> str:
@@ -90,19 +109,29 @@ def _norm_words(value: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", (value or "").lower()) if len(w) > 2}
 
 
-def _prompt_terms(prompts: Iterable[models.Prompt]) -> set[str]:
+def _prompt_terms(prompts: Iterable[models.Prompt]) -> tuple[set[str], set[str]]:
     terms: set[str] = set()
+    specific: set[str] = set()
     for prompt in prompts:
-        terms |= _norm_words(prompt.prompt_text)
-        terms |= _norm_words(prompt.topic_cluster)
-    return terms
+        row_terms = _norm_words(prompt.prompt_text) | _norm_words(prompt.topic_cluster)
+        terms |= row_terms
+        specific |= {t for t in row_terms if t not in GENERIC_TERMS}
+    return terms, specific
 
 
-def _matches_terms(text: str, terms: set[str]) -> bool:
+def _matches_terms(text: str, terms: set[str], specific_terms: set[str]) -> bool:
     if not terms:
         return False
     words = _norm_words(text)
-    return len(words & terms) >= 2
+    specific_overlap = words & specific_terms
+    domain_overlap = words & DOMAIN_TERMS & terms
+    if len(specific_overlap) >= 2:
+        return True
+    if len(words & terms) >= 4:
+        return True
+    if len(domain_overlap) >= 1 and len(words & terms) >= 3:
+        return True
+    return False
 
 
 def _top_dict(counter: Counter, limit: int = 8) -> list[dict]:
@@ -176,7 +205,6 @@ def _page_leverage_score(best_page: dict | None) -> int:
 
 
 def _opportunity_type(evidence: dict) -> str:
-    total = max(evidence["run_count"], 1)
     competitor_rate = evidence["competitor_pressure_rate"]
     owned_rate = evidence["owned_citation_rate"]
     best_page = evidence.get("best_existing_page")
@@ -184,30 +212,31 @@ def _opportunity_type(evidence: dict) -> str:
     query_text = " ".join(q["query"] for q in evidence.get("top_gsc_queries", []))
     prompts_text = " ".join(evidence.get("linked_prompt_texts", []))
     cited_domains = " ".join(d["domain"] for d in evidence.get("top_external_sources", []))
+    substitute_hits = sum(1 for term in SUBSTITUTE_TERMS if term in (query_text + " " + prompts_text).lower())
 
-    if any(term in (query_text + " " + prompts_text).lower() for term in SUBSTITUTE_TERMS):
-        return "Defend Substitute Positioning"
-    if competitor_rate >= 35:
-        return "Add Comparison Section"
-    if has_leverage:
+    if has_leverage and evidence["gap_count"] + evidence["risk_count"] >= 1:
         return "Upgrade Existing Page"
+    if competitor_rate >= 45:
+        return "Add Comparison Section"
+    if substitute_hits >= 2:
+        return "Defend Substitute Positioning"
     if "?" in prompts_text or any(w in query_text.lower() for w in ("best", "how", "what", "which", "compare")):
         return "Add FAQ / Buyer Questions"
     if owned_rate == 0 and any(hint in cited_domains.lower() for hint in TECHNICAL_SOURCE_HINTS):
         return "Add Citation Proof"
     if best_page and owned_rate < 35:
         return "Improve Internal Linking"
-    if total >= 2:
+    if evidence["run_count"] >= 2:
         return "Create Source Page"
     return "Add Citation Proof"
 
 
 def _opportunity_title(opportunity_type: str, cluster: str, best_page: dict | None) -> str:
     if opportunity_type == "Upgrade Existing Page" and best_page:
-        label = best_page.get("title") or best_page.get("url") or cluster
-        return f"Upgrade existing {cluster} page for AI citations: {label[:70]}"
+        label = _page_label(best_page)
+        return f"Upgrade {label} for {cluster} AI visibility"
     if opportunity_type == "Add Comparison Section":
-        return f"Add competitor comparison content for {cluster}"
+        return f"Add comparison section for {cluster} competitors"
     if opportunity_type == "Add FAQ / Buyer Questions":
         return f"Add buyer-question FAQ coverage for {cluster}"
     if opportunity_type == "Add Citation Proof":
@@ -215,8 +244,18 @@ def _opportunity_title(opportunity_type: str, cluster: str, best_page: dict | No
     if opportunity_type == "Improve Internal Linking":
         return f"Strengthen internal authority links for {cluster}"
     if opportunity_type == "Defend Substitute Positioning":
-        return f"Defend TUBALL against substitute materials in {cluster}"
+        return f"Position TUBALL against substitute materials in {cluster}"
     return f"Create source page for {cluster}"
+
+
+def _page_label(page: dict) -> str:
+    title = (page.get("title") or "").strip()
+    if title:
+        return title[:60]
+    url = (page.get("url") or "").strip().rstrip("/")
+    if not url:
+        return "existing page"
+    return url.split("/")[-1].replace("-", " ")[:60] or url
 
 
 def build_cluster_evidence(db: Session) -> list[dict]:
@@ -232,7 +271,7 @@ def build_cluster_evidence(db: Session) -> list[dict]:
     out: list[dict] = []
 
     for cluster, plist in by_cluster.items():
-        terms = _prompt_terms(plist)
+        terms, specific_terms = _prompt_terms(plist)
         good = [p for p in plist if p.monitor_status == "Good"]
         risk = [p for p in plist if p.monitor_status == "Risk"]
         gap = [p for p in plist if p.monitor_status == "Gap"]
@@ -253,8 +292,8 @@ def build_cluster_evidence(db: Session) -> list[dict]:
                 else:
                     external_sources[d] += 1
 
-        gsc_rows = [row for row in gsc_all if _matches_terms(row.query + " " + row.page, terms)]
-        ga4_rows = [row for row in ga4_all if _matches_terms((row.page_path or "") + " " + (row.page_title or ""), terms)]
+        gsc_rows = [row for row in gsc_all if _matches_terms(row.query + " " + row.page, terms, specific_terms)]
+        ga4_rows = [row for row in ga4_all if _matches_terms((row.page_path or "") + " " + (row.page_title or ""), terms, specific_terms)]
         gsc_impressions = sum(r.impressions or 0 for r in gsc_rows)
         gsc_clicks = sum(r.clicks or 0 for r in gsc_rows)
         pos_weight = sum(max(r.impressions or 0, 1) for r in gsc_rows)

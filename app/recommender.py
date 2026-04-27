@@ -471,7 +471,15 @@ def _strategic_actions(item: dict) -> list[str]:
         comps = ", ".join(x["name"] for x in item["top_competitors"][:4]) or "the cited competitors/substitutes"
         actions.append(f"Add a direct comparison section against {comps}.")
     if typ == "Add FAQ / Buyer Questions" or item["top_gsc_queries"]:
-        qs = [q["query"] for q in item["top_gsc_queries"][:3] if q.get("query")]
+        seen_qs = set()
+        qs = []
+        for q in item["top_gsc_queries"]:
+            text = (q.get("query") or "").strip()
+            if text and text.lower() not in seen_qs:
+                seen_qs.add(text.lower())
+                qs.append(text)
+            if len(qs) >= 3:
+                break
         actions.append("Add FAQ/H2 blocks matching buyer questions" + (": " + "; ".join(qs) if qs else "."))
     if typ in ("Add Citation Proof", "Create Source Page") or item["owned_citation_rate"] < 35:
         actions.append("Add citation-friendly proof: dosage ranges, use cases, material compatibility, claims, and source-style references.")
