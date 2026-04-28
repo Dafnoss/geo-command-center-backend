@@ -23,6 +23,11 @@ def latest_research(db: Session = Depends(get_db)):
     return prompt_research.latest_research(db)
 
 
+@router.get("/coverage")
+def coverage_report(db: Session = Depends(get_db)):
+    return prompt_research.coverage_report(db)
+
+
 @router.post("/{batch_id}/apply", response_model=schemas.PromptResearchApplyOut)
 def apply_research(batch_id: str, data: schemas.PromptResearchApplyRequest, db: Session = Depends(get_db)):
     if not data.item_ids:

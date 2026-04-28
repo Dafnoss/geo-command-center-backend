@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import intelligence  # noqa: E402
 from app import models  # noqa: E402
+from app import prompt_research  # noqa: E402
 from app.traffic import classify_ai_source  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
@@ -147,6 +148,93 @@ class IntelligenceTests(unittest.TestCase):
         self.assertIn(delete_id, body["deleted"])
         self.assertEqual(body["added"][0]["monitor_status"], "Unchecked")
         self.assertEqual(self.client.get(f"/prompts/{delete_id}").status_code, 404)
+
+    def test_prompt_research_coverage_finds_missing_application_and_supplier(self):
+        db = SessionLocal()
+        try:
+            coverage = prompt_research.build_coverage_map(db, gsc_rows=[], ga4_rows=[], prompts=[], trend_rows=[])
+        finally:
+            db.close()
+        add_candidates = [r for r in coverage if r["monitor_status"] == "missing"]
+        prompts = [r["representative_prompt"].lower() for r in add_candidates]
+        self.assertTrue(any("conductive silicone rubber" in p for p in prompts))
+        self.assertTrue(any("single-walled carbon nanotube" in p and "supply" in p for p in prompts))
+
+    def test_prompt_research_existing_equivalent_prevents_missing_add(self):
+        p = models.Prompt(
+            prompt_id="PEQ",
+            prompt_text="What additive should I use for electrically conductive silicone rubber?",
+            topic_cluster="Rubber and elastomers",
+            monitor_status="Unchecked",
+        )
+        db = SessionLocal()
+        try:
+            coverage = prompt_research.build_coverage_map(db, gsc_rows=[], ga4_rows=[], prompts=[p], trend_rows=[])
+        finally:
+            db.close()
+        silicone = next(r for r in coverage if r["coverage_topic"] == "electrically conductive silicone rubber additive")
+        self.assertNotEqual(silicone["monitor_status"], "missing")
+
+    def test_prompt_research_low_value_duplicate_produces_delete(self):
+        low = models.Prompt(
+            prompt_id="PDUP-LOW",
+            prompt_text="duplicate conductive additive prompt",
+            topic_cluster="Test",
+            monitor_status="Gap",
+            business_priority=1,
+        )
+        better = models.Prompt(
+            prompt_id="PDUP-HIGH",
+            prompt_text="duplicate conductive additive prompt",
+            topic_cluster="Test",
+            monitor_status="Good",
+            business_priority=5,
+        )
+        rows = prompt_research._delete_candidates([], [], [], [low, better])
+        self.assertTrue(any(r["prompt_id"] == "PDUP-LOW" and r["action"] == "Delete" for r in rows))
+
+    def test_prompt_research_approve_add_runs_monitor_and_reject_does_not_mutate(self):
+        suffix = uuid.uuid4().hex[:8]
+        original = prompt_research.monitor_engine.run_query
+        prompt_research.monitor_engine.run_query = lambda db, prompt: {"prompt_id": prompt.prompt_id, "monitor_status": "Good", "cost_usd": 0}
+        try:
+            run = self.client.post("/prompt-research/run", json={"count": 10})
+            self.assertEqual(run.status_code, 200, run.text)
+            data = run.json()
+            add_item = next(i for i in data["items"] if i["action"] == "Add")
+            approve = self.client.post(f"/prompt-research/{data['batch']['batch_id']}/items/{add_item['item_id']}/approve")
+            self.assertEqual(approve.status_code, 200, approve.text)
+            body = approve.json()
+            self.assertIsNotNone(body["added"])
+            self.assertEqual(body["monitor"]["monitor_status"], "Good")
+
+            before = len(self.client.get("/prompts").json())
+            db = SessionLocal()
+            try:
+                reject = models.PromptResearchItem(
+                    item_id=f"PRI-REJ-{suffix}",
+                    batch_id=data["batch"]["batch_id"],
+                    action="Add",
+                    query_text=f"Rejected prompt {suffix}",
+                    topic_cluster="Test",
+                    intent_type="category education",
+                    priority_score=50,
+                    confidence_score=50,
+                    evidence={},
+                    reason="test",
+                    status="draft",
+                )
+                db.add(reject)
+                db.commit()
+                reject_id = reject.item_id
+            finally:
+                db.close()
+            rejected = self.client.post(f"/prompt-research/{data['batch']['batch_id']}/items/{reject_id}/reject")
+            self.assertEqual(rejected.status_code, 200, rejected.text)
+            after = len(self.client.get("/prompts").json())
+            self.assertEqual(after, before)
+        finally:
+            prompt_research.monitor_engine.run_query = original
 
     def test_ai_traffic_classifier_and_monthly_endpoint(self):
         self.assertEqual(classify_ai_source("chatgpt.com", "referral"), "ChatGPT")
