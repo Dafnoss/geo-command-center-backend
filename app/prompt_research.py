@@ -336,16 +336,21 @@ def _add_candidates_from_search_gaps(gsc_rows, ga4_rows, trend_rows, prompts, li
     out = []
     existing = list(prompts)
     seen = {normalize_query(p.prompt_text) for p in prompts}
+    seen_opportunities = set()
     for row in sorted(gsc_rows, key=lambda r: r.impressions or 0, reverse=True):
         query = (row.query or "").strip()
-        if not _is_business_relevant_query(query):
+        opportunity = _opportunity_from_gsc_query(query)
+        if not opportunity:
             continue
-        prompt_text = _buyer_prompt_from_query(query)
+        prompt_text = opportunity["prompt_text"]
         norm = normalize_query(prompt_text)
-        if not norm or norm in seen or _has_equivalent_prompt(prompt_text, existing):
+        if not norm or norm in seen or opportunity["key"] in seen_opportunities or _has_equivalent_prompt(prompt_text, existing):
             continue
-        terms = list(_tokens(prompt_text))
-        matched_gsc = [r for r in gsc_rows if _similar(prompt_text, f"{r.query} {r.page}")][:8]
+        terms = opportunity["terms"]
+        matched_gsc = [
+            r for r in gsc_rows
+            if _opportunity_from_gsc_query(r.query or "") and _opportunity_from_gsc_query(r.query or "")["key"] == opportunity["key"]
+        ][:8]
         if row not in matched_gsc:
             matched_gsc = [row] + matched_gsc[:7]
         matched_ga4 = _matched_ga4_for_topic(ga4_rows, terms)
@@ -355,10 +360,10 @@ def _add_candidates_from_search_gaps(gsc_rows, ga4_rows, trend_rows, prompts, li
         ga4 = _ga4_summary(matched_ga4)
         score = min(100, 45 + _score_add(gsc_impressions, gsc_clicks, _weighted_position(matched_gsc), ga4, trend))
         coverage = {
-            "coverage_topic": "GSC-discovered buyer query",
-            "product_area": _product_area_for_text(prompt_text),
-            "application": _application_label(_application_facet(prompt_text.lower(), _tokens(prompt_text))),
-            "buyer_intent": _intent_for(prompt_text),
+            "coverage_topic": "GSC-discovered buyer opportunity",
+            "product_area": opportunity["product_area"],
+            "application": opportunity["application"],
+            "buyer_intent": opportunity["intent_type"],
             "representative_prompt": prompt_text,
             "monitor_status": "missing",
             "matched_existing_prompts": [],
@@ -377,12 +382,12 @@ def _add_candidates_from_search_gaps(gsc_rows, ga4_rows, trend_rows, prompts, li
         out.append({
             "action": "Add",
             "query_text": prompt_text,
-            "topic_cluster": _cluster_for(prompt_text),
-            "intent_type": _intent_for(prompt_text),
+            "topic_cluster": opportunity["topic_cluster"],
+            "intent_type": opportunity["intent_type"],
             "priority_score": score,
             "confidence_score": coverage["confidence_score"],
             "reason": (
-                "Add because this buyer-like query appears in Google Search Console but is not represented in the Monitor Queue "
+                "Add because Google Search Console shows demand for this buyer opportunity and it is not represented in the Monitor Queue "
                 f"({gsc_impressions:,} impressions, {gsc_clicks:,} clicks)."
             ),
             "evidence": {
@@ -395,6 +400,7 @@ def _add_candidates_from_search_gaps(gsc_rows, ga4_rows, trend_rows, prompts, li
             },
         })
         seen.add(norm)
+        seen_opportunities.add(opportunity["key"])
         if len(out) >= limit:
             break
     return out
@@ -785,6 +791,63 @@ def _is_business_relevant_query(query: str) -> bool:
     return has_relevant_material and _has_buyer_context(low, tokens)
 
 
+def _opportunity_from_gsc_query(query: str) -> dict | None:
+    low = (query or "").lower().strip()
+    if not _is_business_relevant_query(low):
+        return None
+    tokens = _tokens(low)
+    material = _material_facet(low, tokens)
+    application = _application_facet(low, tokens)
+    family = _intent_family(low, tokens)
+    comparison = _comparison_facet(low, tokens)
+
+    # Generic educational queries are search demand, not monitor prompts. Only
+    # promote GSC rows when they imply a concrete buyer decision.
+    if application == "general" and family not in {"supplier", "comparison", "alternative"}:
+        return None
+    if material in {"carbon-black", "carbon-fiber", "graphene-nanoplatelets"} and family not in {"comparison", "alternative"}:
+        family = "alternative"
+
+    material_label = _material_prompt_label(material)
+    application_label = _application_prompt_label(application)
+    product_area = _product_area_for_material(material)
+    topic_cluster = _cluster_for_opportunity(family, application, material)
+
+    if family == "supplier":
+        if application == "general":
+            prompt = f"Which suppliers are recommended for {material_label} additives?"
+        else:
+            prompt = f"Which suppliers are recommended for {material_label} additives for {application_label}?"
+        intent = "supplier/vendor"
+    elif family == "comparison":
+        prompt = _comparison_prompt(material, comparison, application)
+        intent = "comparison"
+    elif family == "alternative":
+        target = _substitute_label(material)
+        if application == "general":
+            prompt = f"What is the best alternative to {target} for conductive polymer applications?"
+        else:
+            prompt = f"What is the best alternative to {target} for {application_label}?"
+        intent = "substitute/alternative"
+    elif family == "safety":
+        prompt = f"What should buyers know about safety and compliance for {material_label} additives in {application_label}?"
+        intent = "safety/regulatory"
+    else:
+        prompt = _application_prompt(material, application)
+        intent = "application/use-case"
+
+    key = f"{family}:{material}:{application}:{comparison}"
+    return {
+        "key": key,
+        "prompt_text": prompt,
+        "topic_cluster": topic_cluster,
+        "intent_type": intent,
+        "product_area": product_area,
+        "application": _application_label(application),
+        "terms": list(tokens | _tokens(prompt)),
+    }
+
+
 def _is_navigational_or_too_generic_query(low: str) -> bool:
     tokens = _tokens(low)
     if any(noise in low for noise in ('"tesla"', " tesla ", " balkan", " linkedin", "stock price", " ваканс", "career", "careers", "job ", "jobs ")):
@@ -817,7 +880,8 @@ def _has_buyer_context(low: str, tokens: set[str]) -> bool:
         "polymer", "polymers", "battery", "batteries", "electrode", "electrodes",
         "epoxy", "adhesive", "adhesives", "flooring", "masterbatch", "dispersion",
         "low", "dosage", "loading", "viscosity", "mechanical", "transparent",
-        "colored", "colour", "emi", "shielding",
+        "colored", "colour", "emi", "shielding", "aerospace", "lightweight",
+        "composite", "composites",
     }
     context_phrases = (
         "carbon black", "conductive silicone", "conductive rubber",
@@ -827,38 +891,7 @@ def _has_buyer_context(low: str, tokens: set[str]) -> bool:
     return bool(tokens & context_tokens) or any(phrase in low for phrase in context_phrases)
 
 
-def _buyer_prompt_from_query(query: str) -> str:
-    clean = _clean_query(query)
-    low = clean.lower()
-    if clean.endswith("?") and any(low.startswith(prefix) for prefix in ("what", "which", "how", "where", "why", "does", "can", "should")):
-        return clean[0].upper() + clean[1:]
-    if _intent_family(low, _tokens(low)) == "supplier":
-        topic = _strip_supplier_words(clean)
-        return f"Which suppliers are recommended for {topic}?"
-    if _intent_family(low, _tokens(low)) in {"comparison", "alternative"}:
-        return f"What should buyers know when comparing {clean}?"
-    if any(x in low for x in ("safety", "reach", "regulatory", "compliance", "compliant")):
-        return f"What should buyers know about {clean}?"
-    if any(x in low for x in ("how to", "how do", "how does")):
-        return clean[0].upper() + clean[1:] + ("?" if not clean.endswith("?") else "")
-    return f"What additive should I use for {clean}?"
-
-
-def _clean_query(query: str) -> str:
-    clean = re.sub(r"\s+", " ", (query or "").strip(" ?.,;:")).strip()
-    return clean[:1].upper() + clean[1:] if clean else "conductive additive selection"
-
-
-def _strip_supplier_words(text: str) -> str:
-    clean = re.sub(r"\b(top|best|recommended|supplier|suppliers|vendor|vendors|companies|company|manufacturer|manufacturers|where to buy|where can i buy)\b", "", text, flags=re.I)
-    clean = re.sub(r"\s+", " ", clean).strip(" ?.,;:-")
-    if not clean:
-        return text.strip(" ?.,;:-")
-    return clean[:1].lower() + clean[1:]
-
-
-def _product_area_for_text(text: str) -> str:
-    material = _material_facet(text.lower(), _tokens(text))
+def _product_area_for_material(material: str) -> str:
     labels = {
         "swcnt": "SWCNT",
         "mwcnt": "MWCNT",
@@ -872,6 +905,97 @@ def _product_area_for_text(text: str) -> str:
         "conductive-additive": "Conductive additives",
     }
     return labels.get(material, "Conductive additives")
+
+
+def _material_prompt_label(material: str) -> str:
+    labels = {
+        "swcnt": "single-walled carbon nanotube",
+        "mwcnt": "multi-walled carbon nanotube",
+        "graphene-nanotubes": "graphene nanotube",
+        "carbon-black": "carbon black",
+        "graphene-nanoplatelets": "graphene nanoplatelet",
+        "carbon-fiber": "carbon fiber",
+        "cnt": "carbon nanotube",
+        "masterbatch": "conductive masterbatch",
+        "antistatic-additive": "anti-static",
+        "conductive-additive": "conductive",
+    }
+    return labels.get(material, "conductive")
+
+
+def _substitute_label(material: str) -> str:
+    labels = {
+        "carbon-black": "carbon black",
+        "carbon-fiber": "carbon fiber",
+        "graphene-nanoplatelets": "graphene nanoplatelets",
+        "mwcnt": "multi-walled carbon nanotubes",
+        "cnt": "conventional carbon nanotube additives",
+    }
+    return labels.get(material, _material_prompt_label(material) + " additives")
+
+
+def _application_prompt_label(application: str) -> str:
+    labels = {
+        "battery-electrodes": "battery electrode conductivity",
+        "aerospace": "lightweight aerospace composites",
+        "automotive": "automotive conductive materials",
+        "electronics": "electronics and ESD materials",
+        "flooring": "ESD flooring systems",
+        "coatings": "conductive coatings",
+        "silicone-rubber": "electrically conductive silicone rubber",
+        "elastomers": "conductive elastomers",
+        "plastics": "conductive plastics",
+        "resins-adhesives": "conductive resins and adhesives",
+        "films-packaging": "anti-static films and packaging",
+        "emi-shielding": "EMI shielding plastics",
+    }
+    return labels.get(application, "industrial conductive materials")
+
+
+def _application_prompt(material: str, application: str) -> str:
+    app = _application_prompt_label(application)
+    if application == "battery-electrodes":
+        return f"Which { _material_prompt_label(material) } additive is best for battery electrode conductivity?"
+    if application == "silicone-rubber":
+        return "What additive is best for electrically conductive silicone rubber?"
+    if application == "elastomers":
+        return "What additive is best for electrically conductive elastomers?"
+    if application == "coatings":
+        return "What additive is best for conductive coatings?"
+    if application == "flooring":
+        return "What additive is best for ESD flooring materials?"
+    if application == "plastics":
+        return "What additive is best for electrically conductive plastics?"
+    if application == "resins-adhesives":
+        return "What additive is best for electrically conductive resins and adhesives?"
+    return f"What additive is best for {app}?"
+
+
+def _comparison_prompt(material: str, comparison: str, application: str) -> str:
+    app = _application_prompt_label(application)
+    if "carbon-black" in comparison or material == "carbon-black":
+        return f"Carbon black vs carbon nanotubes: which is better for {app}?"
+    if "mwcnt" in comparison or material in {"swcnt", "mwcnt"}:
+        return f"Single-walled vs multi-walled carbon nanotubes: which is better for {app}?"
+    if "graphene-nanoplatelets" in comparison:
+        return f"Graphene nanotubes vs graphene nanoplatelets: which is better for {app}?"
+    return f"Which conductive additive is best for {app}?"
+
+
+def _cluster_for_opportunity(family: str, application: str, material: str) -> str:
+    if family == "supplier":
+        return "Supplier / procurement"
+    if family in {"comparison", "alternative"} or material in {"carbon-black", "carbon-fiber", "graphene-nanoplatelets"}:
+        return "Comparison and selection"
+    if family == "safety":
+        return "Safety and regulation"
+    if application in {"silicone-rubber", "elastomers"}:
+        return "Rubber and elastomers"
+    if application in {"coatings", "flooring", "resins-adhesives"}:
+        return "Coatings and paints"
+    if application == "battery-electrodes":
+        return "Batteries / energy storage"
+    return "General additive discovery"
 
 
 def _application_label(application: str) -> str:

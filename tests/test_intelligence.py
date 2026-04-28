@@ -326,8 +326,8 @@ class IntelligenceTests(unittest.TestCase):
                 site_url="https://tuball.com/",
                 date_start=date.today(),
                 date_end=date.today(),
-                query="conductive rubber additive for EV seals",
-                page="https://tuball.com/applications/elastomers",
+                query="carbon nanotube additive for aerospace lightweight composites",
+                page="https://tuball.com/applications/composites",
                 impressions=900,
                 clicks=12,
                 avg_position=9.0,
@@ -336,15 +336,26 @@ class IntelligenceTests(unittest.TestCase):
         rows = prompt_research._add_candidates_from_search_gaps(gsc, [], [], existing, 5)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["action"], "Add")
-        self.assertIn("EV seals", rows[0]["query_text"])
+        self.assertIn("aerospace", rows[0]["query_text"])
 
     def test_prompt_research_gsc_fallback_skips_brand_and_generic_queries(self):
         self.assertFalse(prompt_research._is_business_relevant_query("OCSiAl"))
         self.assertFalse(prompt_research._is_business_relevant_query("TUBALL"))
         self.assertFalse(prompt_research._is_business_relevant_query("single walled carbon nanotubes"))
         self.assertFalse(prompt_research._is_business_relevant_query("carbon nanotubes structure"))
+        self.assertFalse(prompt_research._is_business_relevant_query("what is carbon black used for"))
+        self.assertFalse(prompt_research._is_business_relevant_query("carbon black production"))
+        self.assertFalse(prompt_research._is_business_relevant_query("carbon black uses"))
         self.assertTrue(prompt_research._is_business_relevant_query("conductive silicone additive"))
         self.assertTrue(prompt_research._is_business_relevant_query("carbon nanotube supplier for battery electrodes"))
+
+    def test_prompt_research_gsc_fallback_uses_controlled_templates(self):
+        bad = prompt_research._opportunity_from_gsc_query("what is carbon black used for")
+        self.assertIsNone(bad)
+        silicone = prompt_research._opportunity_from_gsc_query("conductive silicone")
+        self.assertEqual(silicone["prompt_text"], "What additive is best for electrically conductive silicone rubber?")
+        battery = prompt_research._opportunity_from_gsc_query("carbon nanotubes in batteries")
+        self.assertEqual(battery["prompt_text"], "Which carbon nanotube additive is best for battery electrode conductivity?")
 
     def test_prompt_research_ranks_add_coverage_before_queue_cleanup(self):
         selected = prompt_research._rank_and_balance([
