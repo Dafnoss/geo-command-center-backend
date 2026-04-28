@@ -499,6 +499,8 @@ def _duplicate_delete_ids(gsc_rows, ga4_rows, trend_rows, prompts) -> dict[str, 
         groups.setdefault(_intent_group_key(prompt.prompt_text), []).append(prompt)
 
     for group_key, group_prompts in groups.items():
+        if group_key.endswith(":general") or ":general:" in group_key:
+            continue
         if len(group_prompts) <= MAX_PROMPTS_PER_INTENT_GROUP:
             continue
         ranked = sorted(
@@ -633,6 +635,12 @@ def _material_facet(low: str, tokens: set[str] | list[str]) -> str:
 def _application_facet(low: str, tokens: set[str] | list[str]) -> str:
     if any(t in tokens for t in ("battery", "batteries", "electrode", "electrodes", "anode", "cathode", "lithium")):
         return "battery-electrodes"
+    if any(t in tokens for t in ("aerospace", "aircraft", "aviation")):
+        return "aerospace"
+    if any(t in tokens for t in ("automotive", "ev", "vehicle", "vehicles")):
+        return "automotive"
+    if any(t in tokens for t in ("electronics", "electronic", "semiconductor", "semiconductors")):
+        return "electronics"
     if "floor" in low or "flooring" in tokens:
         return "flooring"
     if any(t in tokens for t in ("coating", "coatings", "paint", "paints", "primer", "primers")):

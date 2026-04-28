@@ -228,7 +228,7 @@ class IntelligenceTests(unittest.TestCase):
         prompts = [
             models.Prompt(
                 prompt_id=f"PSUP-{i}",
-                prompt_text=f"Which companies supply single-walled carbon nanotube additives? variant {i}",
+                prompt_text=f"Which companies supply single-walled carbon nanotube additives for battery electrodes? variant {i}",
                 topic_cluster="Supplier / procurement",
                 monitor_status="Unchecked",
                 business_priority=1,
@@ -283,6 +283,28 @@ class IntelligenceTests(unittest.TestCase):
                 monitor_status="Unchecked",
                 business_priority=3,
             ),
+        ]
+        rows = prompt_research._delete_candidates([], [], [], prompts)
+        self.assertEqual(rows, [])
+
+    def test_prompt_research_does_not_cap_broad_supplier_group(self):
+        prompts = [
+            models.Prompt(
+                prompt_id=f"PGEN-{i}",
+                prompt_text=text,
+                topic_cluster="Supplier / procurement",
+                monitor_status="Unchecked",
+                business_priority=3,
+            )
+            for i, text in enumerate([
+                "CNT additive supplier",
+                "carbon nanotube materials suppliers",
+                "Which suppliers offer carbon nanotube additives for conductivity?",
+                "graphene nanotube additive supplier",
+                "single wall carbon nanotube supplier",
+                "carbon nanotube dispersion supplier",
+                "conductive additive supplier",
+            ])
         ]
         rows = prompt_research._delete_candidates([], [], [], prompts)
         self.assertEqual(rows, [])
