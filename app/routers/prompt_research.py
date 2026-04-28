@@ -28,3 +28,19 @@ def apply_research(batch_id: str, data: schemas.PromptResearchApplyRequest, db: 
     if not data.item_ids:
         raise HTTPException(400, "Select at least one research item.")
     return prompt_research.apply_research(db, batch_id=batch_id, item_ids=data.item_ids)
+
+
+@router.post("/{batch_id}/items/{item_id}/approve")
+def approve_research_item(batch_id: str, item_id: str, db: Session = Depends(get_db)):
+    try:
+        return prompt_research.approve_item(db, batch_id=batch_id, item_id=item_id, run_after_add=True)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@router.post("/{batch_id}/items/{item_id}/reject")
+def reject_research_item(batch_id: str, item_id: str, db: Session = Depends(get_db)):
+    try:
+        return prompt_research.reject_item(db, batch_id=batch_id, item_id=item_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))

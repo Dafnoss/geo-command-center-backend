@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.intelligence import FALLBACK_QUERIES, normalize_query
+from app import monitor as monitor_engine
 
 
 STOPWORDS = {
@@ -153,6 +154,55 @@ def apply_research(db: Session, batch_id: str, item_ids: list[str]) -> schemas.P
     for prompt in added:
         db.refresh(prompt)
     return schemas.PromptResearchApplyOut(batch_id=batch_id, added=added, deleted=deleted, skipped=skipped)
+
+
+def approve_item(db: Session, batch_id: str, item_id: str, run_after_add: bool = True) -> dict:
+    item = (
+        db.query(models.PromptResearchItem)
+        .filter_by(batch_id=batch_id, item_id=item_id)
+        .one_or_none()
+    )
+    if not item:
+        raise ValueError("Research item not found.")
+    if item.status != "draft":
+        return {"item_id": item_id, "status": item.status, "added": None, "deleted": None, "monitor": None}
+
+    applied = apply_research(db, batch_id, [item_id])
+    monitor_result = None
+    monitor_error = ""
+    added_prompt = applied.added[0] if applied.added else None
+    added_payload = schemas.PromptOut.model_validate(added_prompt).model_dump(mode="json") if added_prompt else None
+    if added_prompt and run_after_add:
+        prompt = db.query(models.Prompt).filter_by(prompt_id=added_prompt.prompt_id).one_or_none()
+        if prompt:
+            try:
+                monitor_result = monitor_engine.run_query(db, prompt)
+                db.refresh(prompt)
+                added_payload = schemas.PromptOut.model_validate(prompt).model_dump(mode="json")
+            except Exception as exc:
+                monitor_error = str(exc)
+
+    return {
+        "item_id": item_id,
+        "status": "applied",
+        "added": added_payload,
+        "deleted": applied.deleted[0] if applied.deleted else None,
+        "monitor": monitor_result,
+        "monitor_error": monitor_error,
+    }
+
+
+def reject_item(db: Session, batch_id: str, item_id: str) -> dict:
+    item = (
+        db.query(models.PromptResearchItem)
+        .filter_by(batch_id=batch_id, item_id=item_id)
+        .one_or_none()
+    )
+    if not item:
+        raise ValueError("Research item not found.")
+    item.status = "rejected"
+    db.commit()
+    return {"item_id": item_id, "status": "rejected"}
 
 
 def _add_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dict]:
