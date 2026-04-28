@@ -208,6 +208,63 @@ class GoogleAnalyticsMetric(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class GoogleTrendsMetric(Base):
+    __tablename__ = "google_trends_metrics"
+
+    metric_id: Mapped[str] = mapped_column(String, primary_key=True)
+    keyword: Mapped[str] = mapped_column(Text, index=True)
+    geo: Mapped[str] = mapped_column(String, default="")
+    timeframe: Mapped[str] = mapped_column(String, default="")
+    interest_avg: Mapped[float] = mapped_column(Float, default=0.0)
+    interest_max: Mapped[int] = mapped_column(Integer, default=0)
+    related_queries: Mapped[list] = mapped_column(JSON, default=list)
+    rising_queries: Mapped[list] = mapped_column(JSON, default=list)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class AiTrafficMetric(Base):
+    __tablename__ = "ai_traffic_metrics"
+
+    metric_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source: Mapped[str] = mapped_column(String, index=True)
+    source_detail: Mapped[str] = mapped_column(String, default="")
+    date_start: Mapped[date] = mapped_column(Date, index=True)
+    date_end: Mapped[date] = mapped_column(Date, index=True)
+    sessions: Mapped[int] = mapped_column(Integer, default=0)
+    active_users: Mapped[int] = mapped_column(Integer, default=0)
+    conversions: Mapped[float] = mapped_column(Float, default=0.0)
+    landing_pages: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PromptResearchBatch(Base):
+    __tablename__ = "prompt_research_batches"
+
+    batch_id: Mapped[str] = mapped_column(String, primary_key=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    source_status: Mapped[dict] = mapped_column(JSON, default=dict)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    raw_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class PromptResearchItem(Base):
+    __tablename__ = "prompt_research_items"
+
+    item_id: Mapped[str] = mapped_column(String, primary_key=True)
+    batch_id: Mapped[str] = mapped_column(String, index=True)
+    action: Mapped[str] = mapped_column(String, default="Add")  # Add/Keep/Delete
+    prompt_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    query_text: Mapped[str] = mapped_column(Text)
+    topic_cluster: Mapped[str] = mapped_column(String, default="")
+    intent_type: Mapped[str] = mapped_column(String, default="")
+    priority_score: Mapped[int] = mapped_column(Integer, default=0)
+    confidence_score: Mapped[int] = mapped_column(Integer, default=0)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String, default="draft")  # draft/applied/skipped
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class Recommendation(Base):
     __tablename__ = "recommendations"
 

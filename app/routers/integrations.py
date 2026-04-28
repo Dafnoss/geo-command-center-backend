@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.config import settings
 from app.database import get_db
+from app.traffic import classify_ai_source
 from app.visibility import split_csv
 
 
@@ -286,6 +287,81 @@ def _sync_analytics(db: Session, start: date, end: date) -> tuple[str, int, list
     return "", 0, ["GA4 skipped: no GA4 properties discovered for connected accounts. " + " | ".join(errors)[:500]]
 
 
+def _sync_ai_traffic(db: Session, start: date, end: date) -> tuple[int, list[str]]:
+    body = {
+        "dateRanges": [{"startDate": start.isoformat(), "endDate": end.isoformat()}],
+        "dimensions": [
+            {"name": "sessionSource"},
+            {"name": "sessionMedium"},
+            {"name": "landingPagePlusQueryString"},
+        ],
+        "metrics": [{"name": "activeUsers"}, {"name": "sessions"}, {"name": "conversions"}],
+        "limit": 1000,
+    }
+    db.query(models.AiTrafficMetric).delete()
+    grouped: dict[tuple[str, str], dict] = {}
+    errors: list[str] = []
+    for account in _accounts(db):
+        creds = _credentials_for_account(db, account)
+        try:
+            props = _wanted_ga4_properties(db, _list_ga4_properties(creds))
+            for prop_row in props:
+                prop = prop_row["property_id"]
+                url = f"https://analyticsdata.googleapis.com/v1beta/properties/{prop}:runReport"
+                try:
+                    data = _authed_request(creds, "POST", url, body)
+                except HTTPException as exc:
+                    errors.append(f"AI traffic skipped {account.account_label}/{prop}: {exc.detail}")
+                    continue
+                for row in data.get("rows", []):
+                    dims = [v.get("value", "") for v in row.get("dimensionValues", [])]
+                    mets = [v.get("value", "0") for v in row.get("metricValues", [])]
+                    source_raw = dims[0] if len(dims) > 0 else ""
+                    medium = dims[1] if len(dims) > 1 else ""
+                    page = dims[2] if len(dims) > 2 else ""
+                    source = classify_ai_source(source_raw, medium)
+                    if not source:
+                        continue
+                    sessions = int(float(mets[1])) if len(mets) > 1 else 0
+                    users = int(float(mets[0])) if len(mets) > 0 else 0
+                    conversions = float(mets[2]) if len(mets) > 2 else 0.0
+                    key = (source, source_raw or medium or source)
+                    item = grouped.setdefault(key, {
+                        "source": source,
+                        "source_detail": source_raw or medium or source,
+                        "sessions": 0,
+                        "active_users": 0,
+                        "conversions": 0.0,
+                        "landing_pages": {},
+                    })
+                    item["sessions"] += sessions
+                    item["active_users"] += users
+                    item["conversions"] += conversions
+                    if page:
+                        landing = item["landing_pages"].setdefault(page, {"page": page, "sessions": 0, "users": 0, "conversions": 0.0})
+                        landing["sessions"] += sessions
+                        landing["users"] += users
+                        landing["conversions"] += conversions
+        except HTTPException as exc:
+            errors.append(f"AI traffic skipped {account.account_label}: {exc.detail}")
+    inserted = 0
+    for item in grouped.values():
+        pages = sorted(item["landing_pages"].values(), key=lambda p: p["sessions"], reverse=True)[:10]
+        db.add(models.AiTrafficMetric(
+            metric_id=f"AIT-{uuid.uuid4().hex[:12]}",
+            source=item["source"],
+            source_detail=item["source_detail"],
+            date_start=start,
+            date_end=end,
+            sessions=item["sessions"],
+            active_users=item["active_users"],
+            conversions=item["conversions"],
+            landing_pages=pages,
+        ))
+        inserted += 1
+    return inserted, errors[:3]
+
+
 @router.get("/status", response_model=schemas.GoogleConnectorStatus)
 def google_status(db: Session = Depends(get_db)):
     accounts = _accounts(db)
@@ -378,6 +454,8 @@ def google_sync(db: Session = Depends(get_db)):
     warnings.extend(gsc_warnings)
     _, analytics_rows, ga_warnings = _sync_analytics(db, start, end)
     warnings.extend(ga_warnings)
+    ai_traffic_rows, ai_warnings = _sync_ai_traffic(db, start, end)
+    warnings.extend(ai_warnings)
     for account in _accounts(db):
         account.last_sync_at = datetime.utcnow()
         account.updated_at = datetime.utcnow()
@@ -387,6 +465,7 @@ def google_sync(db: Session = Depends(get_db)):
         search_console_sites=sites,
         search_rows=search_rows,
         analytics_rows=analytics_rows,
+        ai_traffic_rows=ai_traffic_rows,
         warnings=warnings,
     )
 

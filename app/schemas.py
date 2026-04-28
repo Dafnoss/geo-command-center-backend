@@ -189,6 +189,7 @@ class GoogleSyncOut(BaseModel):
     search_console_sites: List[str] = []
     search_rows: int = 0
     analytics_rows: int = 0
+    ai_traffic_rows: int = 0
     warnings: List[str] = []
 
 
@@ -215,6 +216,41 @@ class GoogleAnalyticsMetricOut(ORMModel):
     active_users: int
     sessions: int
     conversions: float
+
+
+class GoogleTrendsMetricOut(ORMModel):
+    metric_id: str
+    keyword: str
+    geo: str
+    timeframe: str
+    interest_avg: float
+    interest_max: int
+    related_queries: List[dict]
+    rising_queries: List[dict]
+    fetched_at: datetime
+
+
+class AiTrafficMetricOut(ORMModel):
+    metric_id: str
+    source: str
+    source_detail: str
+    date_start: date
+    date_end: date
+    sessions: int
+    active_users: int
+    conversions: float
+    landing_pages: List[dict]
+
+
+class AiTrafficMonthlyOut(BaseModel):
+    date_start: date
+    date_end: date
+    total_sessions: int
+    total_users: int
+    total_conversions: float
+    source_breakdown: List[dict]
+    landing_pages: List[dict]
+    previous: Optional[dict] = None
 
 
 # ---------------- Recommendation ----------------
@@ -372,6 +408,52 @@ class ApproveCompetitorsRequest(BaseModel):
 
 class ApproveCompetitorsOut(BaseModel):
     competitors: str
+
+
+# ---------------- Prompt research v2 ----------------
+class PromptResearchItemOut(ORMModel):
+    item_id: str
+    batch_id: str
+    action: str
+    prompt_id: Optional[str]
+    query_text: str
+    topic_cluster: str
+    intent_type: str
+    priority_score: int
+    confidence_score: int
+    evidence: dict
+    reason: str
+    status: str
+    created_at: datetime
+
+
+class PromptResearchBatchOut(ORMModel):
+    batch_id: str
+    generated_at: datetime
+    source_status: dict
+    summary: str
+    raw_summary: dict
+
+
+class PromptResearchRunRequest(BaseModel):
+    count: int = 25
+
+
+class PromptResearchOut(BaseModel):
+    batch: Optional[PromptResearchBatchOut]
+    items: List[PromptResearchItemOut] = []
+
+
+class PromptResearchApplyRequest(BaseModel):
+    item_ids: List[str]
+
+
+class PromptResearchApplyOut(BaseModel):
+    batch_id: str
+    added: List[PromptOut] = []
+    deleted: List[str] = []
+    kept: List[str] = []
+    skipped: List[str] = []
 
 
 # ---------------- Task ----------------

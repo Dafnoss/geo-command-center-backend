@@ -10,3 +10,4 @@ httpx==0.27.2
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1
 requests==2.32.3
+pytrends==4.9.2

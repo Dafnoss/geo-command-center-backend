@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import intelligence  # noqa: E402
 from app import models  # noqa: E402
+from app.traffic import classify_ai_source  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
 from app.seed import init_db  # noqa: E402
@@ -64,6 +65,117 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(derive_monitor_status(visible=False, competitors=["Cabot"], domain_cited=True), "Good")
         self.assertEqual(derive_monitor_status(visible=False, competitors=["Cabot"]), "Risk")
         self.assertEqual(derive_monitor_status(visible=False, competitors=[]), "Gap")
+
+    def test_prompt_research_run_and_apply_reviewed_changes(self):
+        suffix = uuid.uuid4().hex[:8]
+        delete_id = f"PDEL-{suffix}"
+        self.client.post("/prompts", json={
+            "prompt_id": delete_id,
+            "prompt_text": f"obsolete low evidence prompt {suffix}",
+            "topic_cluster": "Low value",
+            "business_priority": 1,
+        })
+        db = SessionLocal()
+        try:
+            before = db.query(models.Prompt).count()
+            db.add(models.GoogleSearchMetric(
+                metric_id=f"GSC-{suffix}",
+                site_url="https://tuball.com/",
+                date_start=date.today(),
+                date_end=date.today(),
+                query=f"best conductive additive for polymers {suffix}",
+                page="https://tuball.com/articles/conductive-additives",
+                impressions=2400,
+                clicks=24,
+                avg_position=8.0,
+            ))
+            db.add(models.GoogleAnalyticsMetric(
+                metric_id=f"GA4-{suffix}",
+                property_id="test",
+                date_start=date.today(),
+                date_end=date.today(),
+                page_path="/articles/conductive-additives",
+                page_title="Conductive additives",
+                sessions=320,
+                active_users=240,
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        run = self.client.post("/prompt-research/run", json={"count": 25})
+        self.assertEqual(run.status_code, 200, run.text)
+        data = run.json()
+        self.assertEqual(len(data["items"]), 25)
+        self.assertEqual(data["batch"]["source_status"]["gsc"], "ok")
+        db = SessionLocal()
+        try:
+            self.assertEqual(db.query(models.Prompt).count(), before)
+        finally:
+            db.close()
+
+        add_item = next(i for i in data["items"] if i["action"] == "Add")
+        delete_item = next((i for i in data["items"] if i["action"] == "Delete" and i["prompt_id"] == delete_id), None)
+        if delete_item is None:
+            db = SessionLocal()
+            try:
+                manual_delete = models.PromptResearchItem(
+                    item_id=f"PRI-{suffix}",
+                    batch_id=data["batch"]["batch_id"],
+                    action="Delete",
+                    prompt_id=delete_id,
+                    query_text=f"obsolete low evidence prompt {suffix}",
+                    topic_cluster="Low value",
+                    intent_type="category education",
+                    priority_score=25,
+                    confidence_score=40,
+                    evidence={"monitor": {"status": "Unchecked"}},
+                    reason="Low evidence and low priority; remove to keep monitoring focused.",
+                    status="draft",
+                )
+                db.add(manual_delete)
+                db.commit()
+                delete_item = {"item_id": manual_delete.item_id}
+            finally:
+                db.close()
+        applied = self.client.post(f"/prompt-research/{data['batch']['batch_id']}/apply", json={
+            "item_ids": [add_item["item_id"], delete_item["item_id"]],
+        })
+        self.assertEqual(applied.status_code, 200, applied.text)
+        body = applied.json()
+        self.assertEqual(len(body["added"]), 1)
+        self.assertIn(delete_id, body["deleted"])
+        self.assertEqual(body["added"][0]["monitor_status"], "Unchecked")
+        self.assertEqual(self.client.get(f"/prompts/{delete_id}").status_code, 404)
+
+    def test_ai_traffic_classifier_and_monthly_endpoint(self):
+        self.assertEqual(classify_ai_source("chatgpt.com", "referral"), "ChatGPT")
+        self.assertEqual(classify_ai_source("perplexity.ai", "referral"), "Perplexity")
+        self.assertEqual(classify_ai_source("claude.ai", "referral"), "Claude")
+        self.assertEqual(classify_ai_source("gemini.google.com", "referral"), "Gemini")
+        self.assertEqual(classify_ai_source("deepseek.com", "referral"), "DeepSeek")
+        suffix = uuid.uuid4().hex[:8]
+        db = SessionLocal()
+        try:
+            db.add(models.AiTrafficMetric(
+                metric_id=f"AIT-{suffix}",
+                source="ChatGPT",
+                source_detail="chatgpt.com",
+                date_start=date.today(),
+                date_end=date.today(),
+                sessions=12,
+                active_users=9,
+                conversions=1.0,
+                landing_pages=[{"page": "/articles/test", "sessions": 12, "users": 9, "conversions": 1.0}],
+            ))
+            db.commit()
+        finally:
+            db.close()
+        res = self.client.get("/traffic/ai/monthly")
+        self.assertEqual(res.status_code, 200, res.text)
+        data = res.json()
+        self.assertGreaterEqual(data["total_sessions"], 12)
+        self.assertTrue(any(row["source"] == "ChatGPT" for row in data["source_breakdown"]))
 
     def test_manual_ai_result_tuball_only_counts_good(self):
         prompt = self.client.post("/prompts", json={
@@ -173,16 +285,49 @@ class IntelligenceTests(unittest.TestCase):
             "answer_text": "Several additive chemistries can reduce static in elastomers.",
             "answer_quality_score": 3,
         })
+        db = SessionLocal()
+        try:
+            db.add(models.GoogleSearchMetric(
+                metric_id=f"GSC-PROC-{suffix}",
+                site_url="https://tuball.com/",
+                date_start=date.today(),
+                date_end=date.today(),
+                query="conductive additive suppliers plastics antistatic elastomers",
+                page="https://tuball.com/articles/conductive-additives",
+                clicks=35,
+                impressions=3500,
+                avg_position=9.0,
+            ))
+            db.add(models.GoogleAnalyticsMetric(
+                metric_id=f"GA4-PROC-{suffix}",
+                property_id="test",
+                date_start=date.today(),
+                date_end=date.today(),
+                page_path="/articles/conductive-additives",
+                page_title="Conductive additive suppliers for plastics and elastomers",
+                active_users=250,
+                sessions=310,
+            ))
+            db.commit()
+        finally:
+            db.close()
 
         res = self.client.post("/recommendations/process-prompts")
         self.assertEqual(res.status_code, 200, res.text)
         data = res.json()
         self.assertGreaterEqual(data["considered_prompts"], 2)
-        rec = next((r for r in data["recommendations"] if r["score_breakdown"].get("cluster") == "Processor Test"), None)
+        rec = next((
+            r for r in data["recommendations"]
+            if r["score_breakdown"].get("cluster") == "Processor Test"
+            or "Processor Test" in (r["score_breakdown"].get("source_clusters") or [])
+        ), None)
         self.assertIsNotNone(rec)
         self.assertEqual(rec["score_breakdown"]["scope"], "cluster")
         self.assertEqual(rec["score_breakdown"]["source"], "cluster_evidence")
-        self.assertEqual(rec["score_breakdown"]["prompt_count"], 2)
+        self.assertGreaterEqual(rec["score_breakdown"]["prompt_count"], 2)
+        self.assertIn(risk_id, rec["score_breakdown"]["linked_prompt_ids"])
+        self.assertIn(gap_id, rec["score_breakdown"]["linked_prompt_ids"])
+        self.assertNotIn(unchecked_id, rec["score_breakdown"]["linked_prompt_ids"])
         self.assertIn(rec["type"], {
             "Add Comparison Section",
             "Create Source Page",
