@@ -44,7 +44,7 @@ def run_prompt_research(db: Session, count: int = 25) -> schemas.PromptResearchO
 
     candidates = []
     candidates.extend(_add_candidates(gsc_rows, ga4_rows, trend_rows, prompts))
-    candidates.extend(_keep_delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts))
+    candidates.extend(_delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts))
     candidates.extend(_fallback_add_candidates(candidates, prompts))
 
     selected = _rank_and_balance(candidates, count)
@@ -111,7 +111,6 @@ def apply_research(db: Session, batch_id: str, item_ids: list[str]) -> schemas.P
     existing = {normalize_query(p.prompt_text): p for p in db.query(models.Prompt).all()}
     added: list[models.Prompt] = []
     deleted: list[str] = []
-    kept: list[str] = []
     skipped: list[str] = []
     for item in items:
         if item.status == "applied":
@@ -148,12 +147,12 @@ def apply_research(db: Session, batch_id: str, item_ids: list[str]) -> schemas.P
             db.delete(prompt)
             item.status = "applied"
         else:
-            kept.append(item.item_id)
-            item.status = "applied"
+            item.status = "skipped"
+            skipped.append(item.item_id)
     db.commit()
     for prompt in added:
         db.refresh(prompt)
-    return schemas.PromptResearchApplyOut(batch_id=batch_id, added=added, deleted=deleted, kept=kept, skipped=skipped)
+    return schemas.PromptResearchApplyOut(batch_id=batch_id, added=added, deleted=deleted, skipped=skipped)
 
 
 def _add_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dict]:
@@ -207,7 +206,7 @@ def _add_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dict]:
     return out
 
 
-def _keep_delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dict]:
+def _delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dict]:
     ga4_index = _ga4_index(ga4_rows)
     out = []
     for prompt in prompts:
@@ -219,24 +218,20 @@ def _keep_delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dic
         trend = _best_trend_for_text(prompt.prompt_text, trend_rows)
         gap_boost = {"Gap": 18, "Risk": 12, "Unchecked": -8, "Good": 4}.get(prompt.monitor_status, 0)
         value = _score_add(gsc_impressions, gsc_clicks, pos, ga4, trend) + gap_boost + (prompt.business_priority or 3) * 3
-        action = "Keep"
-        reason = "Keep monitoring: it has search/traffic evidence or current AI visibility value."
         if value < 40 and prompt.monitor_status in ("Unchecked", "Gap") and (prompt.business_priority or 3) <= 3:
-            action = "Delete"
-            reason = "Low evidence and low priority; remove to keep monitoring focused."
-        out.append({
-            "action": action,
-            "prompt_id": prompt.prompt_id,
-            "query_text": prompt.prompt_text,
-            "topic_cluster": prompt.topic_cluster or _cluster_for(prompt.prompt_text),
-            "intent_type": _intent_for(prompt.prompt_text),
-            "priority_score": max(1, min(100, round(value))),
-            "confidence_score": _confidence(gsc_impressions, ga4, trend),
-            "reason": reason,
-            "evidence": _evidence(gsc_impressions, gsc_clicks, pos, ga4, trend, matches) | {
-                "monitor": {"status": prompt.monitor_status, "business_priority": prompt.business_priority},
-            },
-        })
+            out.append({
+                "action": "Delete",
+                "prompt_id": prompt.prompt_id,
+                "query_text": prompt.prompt_text,
+                "topic_cluster": prompt.topic_cluster or _cluster_for(prompt.prompt_text),
+                "intent_type": _intent_for(prompt.prompt_text),
+                "priority_score": max(1, min(100, round(100 - value))),
+                "confidence_score": _confidence(gsc_impressions, ga4, trend),
+                "reason": "Low evidence and low priority; remove to keep monitoring focused.",
+                "evidence": _evidence(gsc_impressions, gsc_clicks, pos, ga4, trend, matches) | {
+                    "monitor": {"status": prompt.monitor_status, "business_priority": prompt.business_priority},
+                },
+            })
     return out
 
 
@@ -304,7 +299,7 @@ def _rank_and_balance(candidates: list[dict], count: int) -> list[dict]:
     candidates = sorted(candidates, key=lambda c: c["priority_score"], reverse=True)
     selected = []
     seen = set()
-    for action in ("Add", "Keep", "Delete"):
+    for action in ("Add", "Delete"):
         for c in candidates:
             key = (c["action"], normalize_query(c["query_text"]), c.get("prompt_id") or "")
             if c["action"] == action and key not in seen:
@@ -473,7 +468,7 @@ def _reason_add(impressions: int, ga4: dict, trend) -> str:
 
 def _summary(items: list[dict], source_status: dict) -> str:
     counts = Counter(i["action"] for i in items)
-    return f"{len(items)} ranked suggestions: {counts.get('Add', 0)} add, {counts.get('Keep', 0)} keep, {counts.get('Delete', 0)} delete. Sources: GSC {source_status['gsc']}, GA4 {source_status['ga4']}, Trends {source_status['trends']}."
+    return f"{len(items)} actionable suggestions: {counts.get('Add', 0)} add, {counts.get('Delete', 0)} delete. Existing useful prompts are left unchanged. Sources: GSC {source_status['gsc']}, GA4 {source_status['ga4']}, Trends {source_status['trends']}."
 
 
 def _next_prompt_id(db: Session) -> str:

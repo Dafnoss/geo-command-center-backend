@@ -452,7 +452,6 @@ class PromptResearchApplyOut(BaseModel):
     batch_id: str
     added: List[PromptOut] = []
     deleted: List[str] = []
-    kept: List[str] = []
     skipped: List[str] = []
 
 
