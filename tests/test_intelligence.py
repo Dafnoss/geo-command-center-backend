@@ -309,6 +309,35 @@ class IntelligenceTests(unittest.TestCase):
         rows = prompt_research._delete_candidates([], [], [], prompts)
         self.assertEqual(rows, [])
 
+    def test_prompt_research_uses_gsc_for_new_adds_when_taxonomy_is_covered(self):
+        existing = [
+            models.Prompt(
+                prompt_id=f"PCOV-{i}",
+                prompt_text=topic[4],
+                topic_cluster="Covered",
+                monitor_status="Good",
+                business_priority=5,
+            )
+            for i, topic in enumerate(prompt_research.COVERAGE_TAXONOMY)
+        ]
+        gsc = [
+            models.GoogleSearchMetric(
+                metric_id="GSC-GAP-1",
+                site_url="https://tuball.com/",
+                date_start=date.today(),
+                date_end=date.today(),
+                query="conductive rubber additive for EV seals",
+                page="https://tuball.com/applications/elastomers",
+                impressions=900,
+                clicks=12,
+                avg_position=9.0,
+            )
+        ]
+        rows = prompt_research._add_candidates_from_search_gaps(gsc, [], [], existing, 5)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["action"], "Add")
+        self.assertIn("EV seals", rows[0]["query_text"])
+
     def test_prompt_research_ranks_add_coverage_before_queue_cleanup(self):
         selected = prompt_research._rank_and_balance([
             {

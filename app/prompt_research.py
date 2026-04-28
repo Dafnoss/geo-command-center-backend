@@ -89,6 +89,8 @@ def run_prompt_research(db: Session, count: int = 25) -> schemas.PromptResearchO
 
     coverage = build_coverage_map(db, gsc_rows=gsc_rows, ga4_rows=ga4_rows, prompts=prompts, trend_rows=trend_rows)
     candidates = _add_candidates_from_coverage(coverage)
+    if len(candidates) < count:
+        candidates.extend(_add_candidates_from_search_gaps(gsc_rows, ga4_rows, trend_rows, prompts, count - len(candidates)))
     candidates.extend(_delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts))
 
     selected = _rank_and_balance(candidates, count)
@@ -327,6 +329,74 @@ def _add_candidates_from_coverage(coverage: list[dict]) -> list[dict]:
                 "trends": row["trends"],
             },
         })
+    return out
+
+
+def _add_candidates_from_search_gaps(gsc_rows, ga4_rows, trend_rows, prompts, limit: int) -> list[dict]:
+    out = []
+    existing = list(prompts)
+    seen = {normalize_query(p.prompt_text) for p in prompts}
+    for row in sorted(gsc_rows, key=lambda r: r.impressions or 0, reverse=True):
+        query = (row.query or "").strip()
+        if not _is_business_relevant_query(query):
+            continue
+        prompt_text = _buyer_prompt_from_query(query)
+        norm = normalize_query(prompt_text)
+        if not norm or norm in seen or _has_equivalent_prompt(prompt_text, existing):
+            continue
+        terms = list(_tokens(prompt_text))
+        matched_gsc = [r for r in gsc_rows if _similar(prompt_text, f"{r.query} {r.page}")][:8]
+        if row not in matched_gsc:
+            matched_gsc = [row] + matched_gsc[:7]
+        matched_ga4 = _matched_ga4_for_topic(ga4_rows, terms)
+        trend = _best_trend_for_terms(terms, trend_rows)
+        gsc_impressions = sum(r.impressions or 0 for r in matched_gsc)
+        gsc_clicks = sum(r.clicks or 0 for r in matched_gsc)
+        ga4 = _ga4_summary(matched_ga4)
+        score = min(100, 45 + _score_add(gsc_impressions, gsc_clicks, _weighted_position(matched_gsc), ga4, trend))
+        coverage = {
+            "coverage_topic": "GSC-discovered buyer query",
+            "product_area": _product_area_for_text(prompt_text),
+            "application": _application_label(_application_facet(prompt_text.lower(), _tokens(prompt_text))),
+            "buyer_intent": _intent_for(prompt_text),
+            "representative_prompt": prompt_text,
+            "monitor_status": "missing",
+            "matched_existing_prompts": [],
+            "matched_gsc_queries": [
+                {"query": r.query, "page": r.page, "impressions": r.impressions, "clicks": r.clicks, "avg_position": r.avg_position}
+                for r in matched_gsc[:6]
+            ],
+            "matched_ga4_pages": [
+                {"page_path": r.page_path, "page_title": r.page_title, "sessions": r.sessions, "users": r.active_users}
+                for r in matched_ga4[:6]
+            ],
+            "matched_owned_pages": _owned_pages(matched_gsc, matched_ga4)[:6],
+            "priority_score": score,
+            "confidence_score": _confidence(gsc_impressions, ga4, trend),
+        }
+        out.append({
+            "action": "Add",
+            "query_text": prompt_text,
+            "topic_cluster": _cluster_for(prompt_text),
+            "intent_type": _intent_for(prompt_text),
+            "priority_score": score,
+            "confidence_score": coverage["confidence_score"],
+            "reason": (
+                "Add because this buyer-like query appears in Google Search Console but is not represented in the Monitor Queue "
+                f"({gsc_impressions:,} impressions, {gsc_clicks:,} clicks)."
+            ),
+            "evidence": {
+                "coverage": coverage,
+                "gsc": {"impressions": gsc_impressions, "clicks": gsc_clicks, "avg_position": _weighted_position(matched_gsc), "examples": [
+                    {"query": r.query, "page": r.page, "impressions": r.impressions} for r in matched_gsc[:5]
+                ]},
+                "ga4": ga4,
+                "trends": _trend_dict(trend) if trend else {},
+            },
+        })
+        seen.add(norm)
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -690,6 +760,91 @@ def _outside_business_scope(text: str) -> bool:
         "rubber parts", "finished product", "molding factory", "injection molding",
     ))
     return procurement and downstream
+
+
+def _is_business_relevant_query(query: str) -> bool:
+    low = (query or "").lower().strip()
+    if len(low) < 4 or _outside_business_scope(low):
+        return False
+    positive_phrases = (
+        "carbon nanotube", "single wall", "single-walled", "graphene nanotube",
+        "carbon black", "conductive additive", "antistatic additive", "anti-static additive",
+        "esd additive", "conductive polymer", "conductive plastic", "conductive rubber",
+        "conductive silicone", "conductive coating", "conductive epoxy", "conductive adhesive",
+        "conductive masterbatch", "cnt additive", "swcnt", "mwcnt", "tuball", "ocsial",
+    )
+    positive_tokens = {
+        "cnt", "swcnt", "mwcnt", "nanotube", "nanotubes", "conductive", "antistatic",
+        "anti-static", "esd", "masterbatch", "graphene", "supplier", "suppliers",
+        "additive", "additives", "filler", "fillers",
+    }
+    tokens = _tokens(low)
+    return any(p in low for p in positive_phrases) or len(tokens & positive_tokens) >= 2
+
+
+def _buyer_prompt_from_query(query: str) -> str:
+    clean = _clean_query(query)
+    low = clean.lower()
+    if clean.endswith("?") and any(low.startswith(prefix) for prefix in ("what", "which", "how", "where", "why", "does", "can", "should")):
+        return clean[0].upper() + clean[1:]
+    if _intent_family(low, _tokens(low)) == "supplier":
+        topic = _strip_supplier_words(clean)
+        return f"Which suppliers are recommended for {topic}?"
+    if _intent_family(low, _tokens(low)) in {"comparison", "alternative"}:
+        return f"What should buyers know when comparing {clean}?"
+    if any(x in low for x in ("safety", "reach", "regulatory", "compliance", "compliant")):
+        return f"What should buyers know about {clean}?"
+    if any(x in low for x in ("how to", "how do", "how does")):
+        return clean[0].upper() + clean[1:] + ("?" if not clean.endswith("?") else "")
+    return f"What additive should I use for {clean}?"
+
+
+def _clean_query(query: str) -> str:
+    clean = re.sub(r"\s+", " ", (query or "").strip(" ?.,;:")).strip()
+    return clean[:1].upper() + clean[1:] if clean else "conductive additive selection"
+
+
+def _strip_supplier_words(text: str) -> str:
+    clean = re.sub(r"\b(top|best|recommended|supplier|suppliers|vendor|vendors|companies|company|manufacturer|manufacturers|where to buy|where can i buy)\b", "", text, flags=re.I)
+    clean = re.sub(r"\s+", " ", clean).strip(" ?.,;:-")
+    if not clean:
+        return text.strip(" ?.,;:-")
+    return clean[:1].lower() + clean[1:]
+
+
+def _product_area_for_text(text: str) -> str:
+    material = _material_facet(text.lower(), _tokens(text))
+    labels = {
+        "swcnt": "SWCNT",
+        "mwcnt": "MWCNT",
+        "graphene-nanotubes": "Graphene nanotubes",
+        "carbon-black": "Carbon black",
+        "graphene-nanoplatelets": "Graphene nanoplatelets",
+        "carbon-fiber": "Carbon fiber",
+        "cnt": "CNT additives",
+        "masterbatch": "Masterbatch",
+        "antistatic-additive": "Anti-static / ESD additives",
+        "conductive-additive": "Conductive additives",
+    }
+    return labels.get(material, "Conductive additives")
+
+
+def _application_label(application: str) -> str:
+    labels = {
+        "battery-electrodes": "Battery electrodes",
+        "aerospace": "Aerospace",
+        "automotive": "Automotive",
+        "electronics": "Electronics",
+        "flooring": "Flooring",
+        "coatings": "Coatings",
+        "silicone-rubber": "Silicone rubber",
+        "elastomers": "Elastomers",
+        "plastics": "Plastics",
+        "resins-adhesives": "Resins / adhesives",
+        "films-packaging": "Films / packaging",
+        "emi-shielding": "EMI shielding",
+    }
+    return labels.get(application, "General")
 
 
 def _too_narrow_low_value(prompt, text: str, value: int, gsc_rows, ga4_rows) -> bool:
