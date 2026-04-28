@@ -24,8 +24,12 @@ STOPWORDS = {
 def run_prompt_research(db: Session, count: int = 25) -> schemas.PromptResearchOut:
     count = max(10, min(50, int(count or 25)))
     source_status = {"gsc": "ok", "ga4": "ok", "trends": "ok"}
-    gsc_rows = db.query(models.GoogleSearchMetric).all()
-    ga4_rows = db.query(models.GoogleAnalyticsMetric).all()
+    gsc_all = db.query(models.GoogleSearchMetric).all()
+    ga4_all = db.query(models.GoogleAnalyticsMetric).all()
+    # Research is a ranking workflow, not an exhaustive export. Use the
+    # strongest rows so the button returns quickly on the free Render tier.
+    gsc_rows = sorted(gsc_all, key=lambda r: r.impressions or 0, reverse=True)[:350]
+    ga4_rows = sorted(ga4_all, key=lambda r: r.sessions or 0, reverse=True)[:350]
     prompts = db.query(models.Prompt).all()
     if not gsc_rows:
         source_status["gsc"] = "missing"
@@ -51,8 +55,10 @@ def run_prompt_research(db: Session, count: int = 25) -> schemas.PromptResearchO
         source_status=source_status,
         summary=_summary(selected, source_status),
         raw_summary={
-            "gsc_rows": len(gsc_rows),
-            "ga4_rows": len(ga4_rows),
+            "gsc_rows": len(gsc_all),
+            "ga4_rows": len(ga4_all),
+            "gsc_rows_used": len(gsc_rows),
+            "ga4_rows_used": len(ga4_rows),
             "trends_rows": len(trend_rows),
             "candidate_count": len(candidates),
         },
