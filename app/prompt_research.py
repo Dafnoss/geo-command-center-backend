@@ -299,7 +299,7 @@ def build_coverage_map(db: Session, gsc_rows, ga4_rows, prompts, trend_rows) -> 
 def _add_candidates_from_coverage(coverage: list[dict]) -> list[dict]:
     out = []
     for row in coverage:
-        if row["monitor_status"] not in ("missing", "weak"):
+        if row["monitor_status"] != "missing":
             continue
         prompt = row["representative_prompt"]
         reason = _coverage_reason(row)
@@ -492,8 +492,6 @@ def _coverage_reason(row: dict) -> str:
     bits = []
     if row["monitor_status"] == "missing":
         bits.append("missing from Monitor Queue")
-    elif row["monitor_status"] == "weak":
-        bits.append("currently monitored but weak in AI visibility")
     if row["gsc"]["impressions"]:
         bits.append(f"{row['gsc']['impressions']:,} GSC impressions")
     if row["ga4"].get("sessions"):
