@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+import os
 from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Iterable
@@ -234,6 +235,10 @@ def _keep_delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dic
 
 
 def _ensure_trends(db: Session, gsc_rows, prompts) -> tuple[list[models.GoogleTrendsMetric], str]:
+    cached = db.query(models.GoogleTrendsMetric).all()
+    if os.getenv("ENABLE_GOOGLE_TRENDS", "0") != "1":
+        return cached, "disabled for live research; using GSC + GA4"
+
     keywords = []
     for row in sorted(gsc_rows, key=lambda r: r.impressions or 0, reverse=True)[:20]:
         if row.query and not _bad_query(row.query):
@@ -243,7 +248,6 @@ def _ensure_trends(db: Session, gsc_rows, prompts) -> tuple[list[models.GoogleTr
     # pytrends is unofficial and can block or rate-limit. Keep the live request
     # intentionally small; GSC + GA4 remain the primary evidence sources.
     keywords = list(dict.fromkeys(k[:90] for k in keywords if k))[:5]
-    cached = db.query(models.GoogleTrendsMetric).all()
     cached_norms = {normalize_query(t.keyword) for t in cached}
     missing = [k for k in keywords if normalize_query(k) not in cached_norms]
     if not missing:
