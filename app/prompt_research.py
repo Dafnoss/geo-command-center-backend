@@ -18,7 +18,7 @@ STOPWORDS = {
     "additive", "additives", "agent", "agents", "polymer", "polymers", "carbon",
     "conductive", "conductivity", "anti", "static", "esd", "to", "in", "of",
     "a", "an", "is", "are", "does", "do", "can", "should", "use", "make",
-    "buyer", "buyers", "know", "about", "consider",
+    "buyer", "buyers", "know", "about", "consider", "variant",
 }
 
 MAX_PROMPTS_PER_INTENT_GROUP = 5
@@ -573,21 +573,102 @@ def _prompt_keep_score(prompt, gsc_rows, ga4_rows, trend_rows) -> float:
 
 
 def _intent_group_key(text: str) -> str:
-    text_l = (text or "").lower()
-    for topic, _product, _application, intent, _representative, terms, _priority in COVERAGE_TAXONOMY:
-        if _topic_match(text_l, topic, terms):
-            return f"{intent}:{topic}"
-    tokens = sorted(_tokens(text_l))
-    if any(t in tokens for t in ("supplier", "suppliers", "supply", "companies", "manufacturer", "manufacturers")):
-        family = "supplier"
-    elif any(t in tokens for t in ("vs", "compare", "comparison", "alternative", "alternatives")):
-        family = "comparison"
-    elif any(t in tokens for t in ("safety", "reach", "regulatory", "regulation", "compliant")):
-        family = "safety"
-    else:
-        family = "application"
-    anchor = [t for t in tokens if t not in STOPWORDS][:5]
-    return f"{family}:{'-'.join(anchor)}"
+    low = (text or "").lower()
+    tokens = sorted(_tokens(low))
+    family = _intent_family(low, tokens)
+    material = _material_facet(low, tokens)
+    application = _application_facet(low, tokens)
+    comparison = _comparison_facet(low, tokens) if family in {"comparison", "alternative"} else ""
+
+    # Supplier searches are not one intent by themselves. "SWCNT supplier for
+    # ESD floor coating" and "SWCNT supplier for battery electrodes" are
+    # different buyer situations and should both remain monitorable.
+    if family == "supplier":
+        return f"supplier:{material}:{application}"
+    if family in {"comparison", "alternative"}:
+        return f"{family}:{material}:{application}:{comparison}"
+    if family == "safety":
+        return f"safety:{material}:{application}"
+
+    anchor = [t for t in tokens if t not in STOPWORDS and t not in {material, application, comparison}][:3]
+    return f"{family}:{material}:{application}:{'-'.join(anchor)}"
+
+
+def _intent_family(low: str, tokens: set[str] | list[str]) -> str:
+    if any(t in tokens for t in ("supplier", "suppliers", "supply", "vendor", "vendors", "companies", "manufacturer", "manufacturers")):
+        return "supplier"
+    if any(t in tokens for t in ("alternative", "alternatives", "substitute", "substitutes")):
+        return "alternative"
+    if any(t in tokens for t in ("vs", "compare", "comparison")) or " vs " in f" {low} ":
+        return "comparison"
+    if any(t in tokens for t in ("safety", "reach", "regulatory", "regulation", "compliant", "compliance")):
+        return "safety"
+    return "application"
+
+
+def _material_facet(low: str, tokens: set[str] | list[str]) -> str:
+    if "single wall" in low or "single-walled" in low or "swcnt" in tokens:
+        return "swcnt"
+    if "multi wall" in low or "multi-walled" in low or "mwcnt" in tokens:
+        return "mwcnt"
+    if "graphene nanotube" in low or "tuball" in tokens:
+        return "graphene-nanotubes"
+    if "carbon black" in low:
+        return "carbon-black"
+    if "graphene nanoplatelet" in low or "gnp" in tokens:
+        return "graphene-nanoplatelets"
+    if "carbon fiber" in low or "carbon fibre" in low:
+        return "carbon-fiber"
+    if "nanotube" in tokens or "nanotubes" in tokens or "cnt" in tokens:
+        return "cnt"
+    if "masterbatch" in tokens:
+        return "masterbatch"
+    if "anti-static" in low or "antistatic" in tokens or "esd" in tokens:
+        return "antistatic-additive"
+    if "conductive" in tokens or "conductivity" in tokens:
+        return "conductive-additive"
+    return "general-additive"
+
+
+def _application_facet(low: str, tokens: set[str] | list[str]) -> str:
+    if any(t in tokens for t in ("battery", "batteries", "electrode", "electrodes", "anode", "cathode", "lithium")):
+        return "battery-electrodes"
+    if "floor" in low or "flooring" in tokens:
+        return "flooring"
+    if any(t in tokens for t in ("coating", "coatings", "paint", "paints", "primer", "primers")):
+        return "coatings"
+    if "silicone" in tokens:
+        return "silicone-rubber"
+    if any(t in tokens for t in ("rubber", "elastomer", "elastomers", "tpu", "epdm", "fkm")):
+        return "elastomers"
+    if any(t in tokens for t in ("plastic", "plastics", "polyamide", "polycarbonate", "abs", "pa", "pc")):
+        return "plastics"
+    if any(t in tokens for t in ("epoxy", "resin", "adhesive", "adhesives")):
+        return "resins-adhesives"
+    if any(t in tokens for t in ("film", "films", "packaging")):
+        return "films-packaging"
+    if any(t in tokens for t in ("emi", "shielding")):
+        return "emi-shielding"
+    return "general"
+
+
+def _comparison_facet(low: str, tokens: set[str] | list[str]) -> str:
+    materials = []
+    if "carbon black" in low:
+        materials.append("carbon-black")
+    if "carbon fiber" in low or "carbon fibre" in low:
+        materials.append("carbon-fiber")
+    if "graphene nanoplatelet" in low or "gnp" in tokens:
+        materials.append("graphene-nanoplatelets")
+    if "graphene nanotube" in low:
+        materials.append("graphene-nanotubes")
+    if "mwcnt" in tokens or "multi-walled" in low or "multi wall" in low:
+        materials.append("mwcnt")
+    if "swcnt" in tokens or "single-walled" in low or "single wall" in low:
+        materials.append("swcnt")
+    if "cnt" in tokens or "nanotube" in tokens or "nanotubes" in tokens:
+        materials.append("cnt")
+    return "-vs-".join(sorted(set(materials))) or "general"
 
 
 def _outside_business_scope(text: str) -> bool:

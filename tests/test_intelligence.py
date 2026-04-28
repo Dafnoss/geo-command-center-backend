@@ -239,6 +239,54 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(r["evidence"]["coverage"]["monitor_status"] == "duplicate-intent" for r in rows))
 
+    def test_prompt_research_supplier_intent_keeps_different_applications(self):
+        prompts = [
+            models.Prompt(
+                prompt_id="PSUP-BATT",
+                prompt_text="SWCNT supplier for dry battery electrode additives",
+                topic_cluster="Supplier / procurement",
+                monitor_status="Unchecked",
+                business_priority=3,
+            ),
+            models.Prompt(
+                prompt_id="PSUP-FLOOR",
+                prompt_text="SWCNT supplier for ESD floor coating additives",
+                topic_cluster="Supplier / procurement",
+                monitor_status="Unchecked",
+                business_priority=3,
+            ),
+            models.Prompt(
+                prompt_id="PSUP-SIL",
+                prompt_text="SWCNT supplier for conductive silicone rubber additives",
+                topic_cluster="Supplier / procurement",
+                monitor_status="Unchecked",
+                business_priority=3,
+            ),
+            models.Prompt(
+                prompt_id="PSUP-PLASTIC",
+                prompt_text="SWCNT supplier for conductive plastic additives",
+                topic_cluster="Supplier / procurement",
+                monitor_status="Unchecked",
+                business_priority=3,
+            ),
+            models.Prompt(
+                prompt_id="PSUP-EMI",
+                prompt_text="SWCNT supplier for EMI shielding plastic additives",
+                topic_cluster="Supplier / procurement",
+                monitor_status="Unchecked",
+                business_priority=3,
+            ),
+            models.Prompt(
+                prompt_id="PSUP-ADH",
+                prompt_text="SWCNT supplier for conductive adhesive additives",
+                topic_cluster="Supplier / procurement",
+                monitor_status="Unchecked",
+                business_priority=3,
+            ),
+        ]
+        rows = prompt_research._delete_candidates([], [], [], prompts)
+        self.assertEqual(rows, [])
+
     def test_prompt_research_ranks_add_coverage_before_queue_cleanup(self):
         selected = prompt_research._rank_and_balance([
             {
