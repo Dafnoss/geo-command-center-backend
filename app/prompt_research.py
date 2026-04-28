@@ -240,7 +240,9 @@ def _ensure_trends(db: Session, gsc_rows, prompts) -> tuple[list[models.GoogleTr
             keywords.append(row.query)
     for prompt in prompts[:20]:
         keywords.append(prompt.prompt_text)
-    keywords = list(dict.fromkeys(k[:90] for k in keywords if k))[:15]
+    # pytrends is unofficial and can block or rate-limit. Keep the live request
+    # intentionally small; GSC + GA4 remain the primary evidence sources.
+    keywords = list(dict.fromkeys(k[:90] for k in keywords if k))[:5]
     cached = db.query(models.GoogleTrendsMetric).all()
     cached_norms = {normalize_query(t.keyword) for t in cached}
     missing = [k for k in keywords if normalize_query(k) not in cached_norms]
@@ -248,7 +250,7 @@ def _ensure_trends(db: Session, gsc_rows, prompts) -> tuple[list[models.GoogleTr
         return cached, ""
     try:
         from pytrends.request import TrendReq  # type: ignore
-        pytrends = TrendReq(hl="en-US", tz=360, timeout=(5, 15))
+        pytrends = TrendReq(hl="en-US", tz=360, timeout=(2, 5), retries=0)
         for chunk in [missing[i:i + 5] for i in range(0, len(missing), 5)]:
             pytrends.build_payload(chunk, timeframe="today 12-m", geo="")
             interest = pytrends.interest_over_time()
@@ -385,9 +387,13 @@ def _weighted_position(rows) -> float:
 
 def _promptize(query: str) -> str:
     text = query.strip().rstrip("?")
-    if re.match(r"^(what|which|how|best|top|compare|carbon|conductive|anti)", text, re.I):
+    if re.match(r"^(what|which|how|best|top|compare)", text, re.I) or re.search(r"\bvs\b", text, re.I):
         return text[:220]
-    return f"What should I know about {text}?"[:220]
+    if any(x in text.lower() for x in ("supplier", "manufacturer", "company", "companies")):
+        return f"Which suppliers should buyers consider for {text}?"[:220]
+    if any(x in text.lower() for x in ("coating", "rubber", "plastic", "polymer", "elastomer", "epoxy", "battery")):
+        return f"What should buyers know about {text}?"[:220]
+    return f"What should buyers know about {text} as conductive or anti-static additives?"[:220]
 
 
 def _cluster_for(text: str) -> str:
