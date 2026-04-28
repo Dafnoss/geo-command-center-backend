@@ -787,6 +787,10 @@ def _is_business_relevant_query(query: str) -> bool:
 
 def _is_navigational_or_too_generic_query(low: str) -> bool:
     tokens = _tokens(low)
+    if any(noise in low for noise in ('"tesla"', " tesla ", " balkan", " linkedin", "stock price", " ваканс", "career", "careers", "job ", "jobs ")):
+        return True
+    if low.startswith(("what is ", "what are ", "definition of ", "meaning of ")):
+        return True
     if any(brand in tokens for brand in ("ocsial", "tuball")):
         if not any(t in tokens for t in ("vs", "alternative", "alternatives", "competitor", "competitors", "compare", "comparison")):
             return True
@@ -797,7 +801,9 @@ def _is_navigational_or_too_generic_query(low: str) -> bool:
     }
     if normalize_query(low) in {normalize_query(x) for x in generic_exact}:
         return True
-    generic_noise = ("structure", "formula", "definition", "meaning", "wikipedia", "wiki", "pdf", "ppt")
+    generic_noise = ("structure", "formula", "definition", "meaning", "wikipedia", "wiki", "pdf", "ppt", "production", "uses", "history")
+    if "properties" in tokens and not any(t in tokens for t in ("mechanical", "electrical", "conductive", "anti-static", "antistatic", "esd")):
+        return True
     return any(term in tokens for term in generic_noise)
 
 
