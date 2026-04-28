@@ -21,6 +21,8 @@ STOPWORDS = {
     "buyer", "buyers", "know", "about", "consider",
 }
 
+MAX_PROMPTS_PER_INTENT_GROUP = 5
+
 
 # Built-in commercial coverage map for OCSiAl/TUBALL. This is intentionally
 # product/application/intent oriented rather than raw keyword oriented.
@@ -137,9 +139,10 @@ def latest_research(db: Session, batch_id: str | None = None) -> schemas.PromptR
     items = (
         db.query(models.PromptResearchItem)
         .filter_by(batch_id=batch.batch_id)
-        .order_by(models.PromptResearchItem.priority_score.desc(), models.PromptResearchItem.created_at.asc())
+        .order_by(models.PromptResearchItem.created_at.asc())
         .all()
     )
+    items = sorted(items, key=lambda item: (0 if item.action == "Add" else 1, -(item.priority_score or 0), item.created_at or datetime.min))
     return schemas.PromptResearchOut(batch=batch, items=items)
 
 
@@ -329,22 +332,24 @@ def _add_candidates_from_coverage(coverage: list[dict]) -> list[dict]:
 
 def _delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dict]:
     out = []
+    duplicate_delete_ids = _duplicate_delete_ids(gsc_rows, ga4_rows, trend_rows, prompts)
     for prompt in prompts:
         matches = [r for r in gsc_rows if _similar(prompt.prompt_text, f"{r.query} {r.page}")]
         ga4 = _matched_ga4_for_topic(ga4_rows, list(_tokens(prompt.prompt_text)))
         trend = _best_trend_for_terms(list(_tokens(prompt.prompt_text)), trend_rows)
         value = _score_add(sum(r.impressions or 0 for r in matches), sum(r.clicks or 0 for r in matches), _weighted_position(matches), _ga4_summary(ga4), trend)
-        duplicate = _has_better_duplicate(prompt, prompts)
-        if (duplicate or value < 30) and prompt.monitor_status in ("Unchecked", "Gap") and (prompt.business_priority or 3) <= 3:
+        delete_reason = _delete_reason(prompt, duplicate_delete_ids, value, matches, ga4)
+        if delete_reason:
             gsc = _evidence(sum(r.impressions or 0 for r in matches), sum(r.clicks or 0 for r in matches), _weighted_position(matches), _ga4_summary(ga4), trend, matches)
+            reason_type = delete_reason["type"]
             gsc["coverage"] = {
-                "coverage_topic": "Queue cleanup",
+                "coverage_topic": delete_reason["label"],
                 "product_area": "",
                 "application": "",
                 "buyer_intent": _intent_for(prompt.prompt_text),
                 "representative_prompt": prompt.prompt_text,
-                "monitor_status": "duplicate" if duplicate else "low-value",
-                "matched_existing_prompts": [{"prompt_id": prompt.prompt_id, "prompt_text": prompt.prompt_text, "monitor_status": prompt.monitor_status}],
+                "monitor_status": reason_type,
+                "matched_existing_prompts": delete_reason.get("matched_prompts", [{"prompt_id": prompt.prompt_id, "prompt_text": prompt.prompt_text, "monitor_status": prompt.monitor_status}]),
                 "matched_gsc_queries": gsc["gsc"].get("examples", []),
                 "matched_ga4_pages": [],
                 "matched_owned_pages": [],
@@ -355,9 +360,9 @@ def _delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dict]:
                 "query_text": prompt.prompt_text,
                 "topic_cluster": prompt.topic_cluster or _cluster_for(prompt.prompt_text),
                 "intent_type": _intent_for(prompt.prompt_text),
-                "priority_score": 55 if duplicate else max(10, min(45, 70 - value)),
-                "confidence_score": 70 if duplicate else 50,
-                "reason": "Duplicate or low-evidence prompt; remove it to keep monitoring focused." if duplicate else "Low evidence and low priority; remove it to keep monitoring focused.",
+                "priority_score": delete_reason["priority_score"],
+                "confidence_score": delete_reason["confidence_score"],
+                "reason": delete_reason["reason"],
                 "evidence": gsc,
             })
     return out
@@ -377,13 +382,6 @@ def _rank_and_balance(candidates: list[dict], count: int) -> list[dict]:
     )
     selected = []
     seen = set()
-    for action in ("Add", "Delete"):
-        for c in candidates:
-            key = (c["action"], normalize_query(c["query_text"]), c.get("prompt_id") or "")
-            if c["action"] == action and key not in seen:
-                selected.append(c)
-                seen.add(key)
-                break
     for c in candidates:
         key = (c["action"], normalize_query(c["query_text"]), c.get("prompt_id") or "")
         semantic_key = _semantic_key(c["query_text"])
@@ -466,6 +464,158 @@ def _has_better_duplicate(prompt: models.Prompt, prompts: list[models.Prompt]) -
         if normalize_query(other.prompt_text) == normalize_query(prompt.prompt_text) or _jaccard(_tokens(other.prompt_text), _tokens(prompt.prompt_text)) >= 0.82:
             return (other.business_priority or 3) >= (prompt.business_priority or 3) and other.monitor_status != "Gap"
     return False
+
+
+def _duplicate_delete_ids(gsc_rows, ga4_rows, trend_rows, prompts) -> dict[str, dict]:
+    delete: dict[str, dict] = {}
+    exact_groups: dict[str, list[models.Prompt]] = {}
+    for prompt in prompts:
+        exact_groups.setdefault(normalize_query(prompt.prompt_text), []).append(prompt)
+    for norm, group_prompts in exact_groups.items():
+        if not norm or len(group_prompts) <= 1:
+            continue
+        ranked = sorted(
+            group_prompts,
+            key=lambda p: _prompt_keep_score(p, gsc_rows, ga4_rows, trend_rows),
+            reverse=True,
+        )
+        keep = ranked[0]
+        matched = [{"prompt_id": keep.prompt_id, "prompt_text": keep.prompt_text, "monitor_status": keep.monitor_status}]
+        for prompt in ranked[1:]:
+            delete[prompt.prompt_id] = {
+                "type": "duplicate-intent",
+                "label": "Exact duplicate",
+                "priority_score": 70,
+                "confidence_score": 95,
+                "matched_prompts": matched,
+                "reason": (
+                    "Delete because this prompt is an exact duplicate of a stronger prompt already kept in the Monitor Queue. "
+                    "It does not add new AI visibility evidence."
+                ),
+            }
+
+    groups: dict[str, list[models.Prompt]] = {}
+    for prompt in prompts:
+        groups.setdefault(_intent_group_key(prompt.prompt_text), []).append(prompt)
+
+    for group_key, group_prompts in groups.items():
+        if len(group_prompts) <= MAX_PROMPTS_PER_INTENT_GROUP:
+            continue
+        ranked = sorted(
+            group_prompts,
+            key=lambda p: _prompt_keep_score(p, gsc_rows, ga4_rows, trend_rows),
+            reverse=True,
+        )
+        keep = ranked[:MAX_PROMPTS_PER_INTENT_GROUP]
+        keep_ids = {p.prompt_id for p in keep}
+        matched = [
+            {"prompt_id": p.prompt_id, "prompt_text": p.prompt_text, "monitor_status": p.monitor_status}
+            for p in keep
+        ]
+        for prompt in ranked[MAX_PROMPTS_PER_INTENT_GROUP:]:
+            if prompt.prompt_id in keep_ids:
+                continue
+            if prompt.prompt_id in delete:
+                continue
+            delete[prompt.prompt_id] = {
+                "type": "duplicate-intent",
+                "label": "Duplicate intent",
+                "priority_score": 55,
+                "confidence_score": 82,
+                "matched_prompts": matched,
+                "reason": (
+                    f"Delete because this is the {len(group_prompts)}th variant of the same buyer intent. "
+                    f"The queue should keep at most {MAX_PROMPTS_PER_INTENT_GROUP} strong variants so we measure coverage without asking the same question dozens of ways."
+                ),
+            }
+    return delete
+
+
+def _delete_reason(prompt, duplicate_delete_ids: dict[str, dict], value: int, gsc_rows, ga4_rows) -> dict | None:
+    if prompt.prompt_id in duplicate_delete_ids:
+        return duplicate_delete_ids[prompt.prompt_id]
+
+    text = prompt.prompt_text or ""
+    if _outside_business_scope(text):
+        return {
+            "type": "outside-business-scope",
+            "label": "Outside business scope",
+            "priority_score": 65,
+            "confidence_score": 85,
+            "reason": (
+                "Delete because this prompt asks about buying or producing a finished downstream product/service, "
+                "not selecting conductive, anti-static, ESD, CNT, SWCNT, graphene nanotube, or TUBALL additive materials."
+            ),
+        }
+
+    if _too_narrow_low_value(prompt, text, value, gsc_rows, ga4_rows):
+        return {
+            "type": "narrow-low-value",
+            "label": "Too narrow / low evidence",
+            "priority_score": 35,
+            "confidence_score": 55,
+            "reason": (
+                "Delete because this is a very narrow technical/property prompt with no meaningful GSC or GA4 evidence "
+                "and it is not needed to understand core AI visibility coverage."
+            ),
+        }
+
+    return None
+
+
+def _prompt_keep_score(prompt, gsc_rows, ga4_rows, trend_rows) -> float:
+    matches = [r for r in gsc_rows if _similar(prompt.prompt_text, f"{r.query} {r.page}")]
+    ga4 = _matched_ga4_for_topic(ga4_rows, list(_tokens(prompt.prompt_text)))
+    trend = _best_trend_for_terms(list(_tokens(prompt.prompt_text)), trend_rows)
+    value = _score_add(sum(r.impressions or 0 for r in matches), sum(r.clicks or 0 for r in matches), _weighted_position(matches), _ga4_summary(ga4), trend)
+    status_weight = {"Good": 35, "Risk": 25, "Gap": 15, "Unchecked": 5}.get(prompt.monitor_status or "Unchecked", 5)
+    return status_weight + (prompt.business_priority or 3) * 8 + value
+
+
+def _intent_group_key(text: str) -> str:
+    text_l = (text or "").lower()
+    for topic, _product, _application, intent, _representative, terms, _priority in COVERAGE_TAXONOMY:
+        if _topic_match(text_l, topic, terms):
+            return f"{intent}:{topic}"
+    tokens = sorted(_tokens(text_l))
+    if any(t in tokens for t in ("supplier", "suppliers", "supply", "companies", "manufacturer", "manufacturers")):
+        family = "supplier"
+    elif any(t in tokens for t in ("vs", "compare", "comparison", "alternative", "alternatives")):
+        family = "comparison"
+    elif any(t in tokens for t in ("safety", "reach", "regulatory", "regulation", "compliant")):
+        family = "safety"
+    else:
+        family = "application"
+    anchor = [t for t in tokens if t not in STOPWORDS][:5]
+    return f"{family}:{'-'.join(anchor)}"
+
+
+def _outside_business_scope(text: str) -> bool:
+    low = (text or "").lower()
+    if "additive" in low or "nanotube" in low or "swcnt" in low or "tuball" in low:
+        return False
+    procurement = any(x in low for x in ("where to order", "where can i order", "where to buy", "buy ", "purchase ", "factory", "factories", "producer of", "manufactures "))
+    downstream = any(x in low for x in (
+        "esd floor", "esd floors", "anti-static floor", "antistatic floor", "flooring contractor",
+        "pu item", "pu items", "polyurethane item", "polyurethane items", "plastic parts",
+        "rubber parts", "finished product", "molding factory", "injection molding",
+    ))
+    return procurement and downstream
+
+
+def _too_narrow_low_value(prompt, text: str, value: int, gsc_rows, ga4_rows) -> bool:
+    if prompt.monitor_status not in ("Unchecked", "Gap"):
+        return False
+    if (prompt.business_priority or 3) > 2:
+        return False
+    if value >= 18 or gsc_rows or ga4_rows:
+        return False
+    low = (text or "").lower()
+    property_terms = (
+        "elongation at break", "tensile modulus", "young's modulus", "shore hardness",
+        "melt flow", "specific surface area", "emi shielding effectiveness",
+    )
+    return any(term in low for term in property_terms)
 
 
 def _best_trend_for_terms(terms: list[str], trend_rows) -> models.GoogleTrendsMetric | None:

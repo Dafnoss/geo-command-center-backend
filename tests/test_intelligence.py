@@ -193,6 +193,52 @@ class IntelligenceTests(unittest.TestCase):
         rows = prompt_research._delete_candidates([], [], [], [low, better])
         self.assertTrue(any(r["prompt_id"] == "PDUP-LOW" and r["action"] == "Delete" for r in rows))
 
+    def test_prompt_research_does_not_delete_correct_small_queue(self):
+        prompts = [
+            models.Prompt(
+                prompt_id=f"PKEEP-{i}",
+                prompt_text=text,
+                topic_cluster="Supplier / procurement",
+                monitor_status="Good",
+                business_priority=4,
+            )
+            for i, text in enumerate([
+                "Which companies supply single-walled carbon nanotube additives?",
+                "Which suppliers are recommended for conductive additives in polymer compounds?",
+                "What additive should I use for electrically conductive silicone rubber?",
+            ])
+        ]
+        rows = prompt_research._delete_candidates([], [], [], prompts)
+        self.assertEqual(rows, [])
+
+    def test_prompt_research_delete_reason_for_outside_business_scope(self):
+        prompt = models.Prompt(
+            prompt_id="POUT",
+            prompt_text="Where to order ESD floors?",
+            topic_cluster="Noise",
+            monitor_status="Unchecked",
+            business_priority=1,
+        )
+        rows = prompt_research._delete_candidates([], [], [], [prompt])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["evidence"]["coverage"]["monitor_status"], "outside-business-scope")
+        self.assertIn("finished downstream product", rows[0]["reason"])
+
+    def test_prompt_research_caps_duplicate_intent_groups(self):
+        prompts = [
+            models.Prompt(
+                prompt_id=f"PSUP-{i}",
+                prompt_text=f"Which companies supply single-walled carbon nanotube additives? variant {i}",
+                topic_cluster="Supplier / procurement",
+                monitor_status="Unchecked",
+                business_priority=1,
+            )
+            for i in range(7)
+        ]
+        rows = prompt_research._delete_candidates([], [], [], prompts)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(r["evidence"]["coverage"]["monitor_status"] == "duplicate-intent" for r in rows))
+
     def test_prompt_research_ranks_add_coverage_before_queue_cleanup(self):
         selected = prompt_research._rank_and_balance([
             {
