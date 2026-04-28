@@ -349,7 +349,7 @@ def _delete_candidates(gsc_rows, ga4_rows, trend_rows, prompts) -> list[dict]:
                 "query_text": prompt.prompt_text,
                 "topic_cluster": prompt.topic_cluster or _cluster_for(prompt.prompt_text),
                 "intent_type": _intent_for(prompt.prompt_text),
-                "priority_score": 80 if duplicate else max(1, min(100, 100 - value)),
+                "priority_score": 55 if duplicate else max(10, min(45, 70 - value)),
                 "confidence_score": 70 if duplicate else 50,
                 "reason": "Duplicate or low-evidence prompt; remove it to keep monitoring focused." if duplicate else "Low evidence and low priority; remove it to keep monitoring focused.",
                 "evidence": gsc,
@@ -365,7 +365,10 @@ def _ensure_trends(db: Session) -> tuple[list[models.GoogleTrendsMetric], str]:
 
 
 def _rank_and_balance(candidates: list[dict], count: int) -> list[dict]:
-    candidates = sorted(candidates, key=lambda c: c["priority_score"], reverse=True)
+    candidates = sorted(
+        candidates,
+        key=lambda c: (0 if c["action"] == "Add" else 1, -c["priority_score"]),
+    )
     selected = []
     seen = set()
     for action in ("Add", "Delete"):

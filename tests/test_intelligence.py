@@ -193,6 +193,22 @@ class IntelligenceTests(unittest.TestCase):
         rows = prompt_research._delete_candidates([], [], [], [low, better])
         self.assertTrue(any(r["prompt_id"] == "PDUP-LOW" and r["action"] == "Delete" for r in rows))
 
+    def test_prompt_research_ranks_add_coverage_before_queue_cleanup(self):
+        selected = prompt_research._rank_and_balance([
+            {
+                "action": "Delete",
+                "prompt_id": "PD1",
+                "query_text": "low value monitored prompt",
+                "priority_score": 55,
+            },
+            {
+                "action": "Add",
+                "query_text": "What additive should I use for electrically conductive silicone rubber?",
+                "priority_score": 42,
+            },
+        ], 2)
+        self.assertEqual(selected[0]["action"], "Add")
+
     def test_prompt_research_approve_add_runs_monitor_and_reject_does_not_mutate(self):
         suffix = uuid.uuid4().hex[:8]
         original = prompt_research.monitor_engine.run_query
