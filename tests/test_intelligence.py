@@ -338,6 +338,14 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(rows[0]["action"], "Add")
         self.assertIn("EV seals", rows[0]["query_text"])
 
+    def test_prompt_research_gsc_fallback_skips_brand_and_generic_queries(self):
+        self.assertFalse(prompt_research._is_business_relevant_query("OCSiAl"))
+        self.assertFalse(prompt_research._is_business_relevant_query("TUBALL"))
+        self.assertFalse(prompt_research._is_business_relevant_query("single walled carbon nanotubes"))
+        self.assertFalse(prompt_research._is_business_relevant_query("carbon nanotubes structure"))
+        self.assertTrue(prompt_research._is_business_relevant_query("conductive silicone additive"))
+        self.assertTrue(prompt_research._is_business_relevant_query("carbon nanotube supplier for battery electrodes"))
+
     def test_prompt_research_ranks_add_coverage_before_queue_cleanup(self):
         selected = prompt_research._rank_and_balance([
             {

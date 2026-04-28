@@ -766,6 +766,8 @@ def _is_business_relevant_query(query: str) -> bool:
     low = (query or "").lower().strip()
     if len(low) < 4 or _outside_business_scope(low):
         return False
+    if _is_navigational_or_too_generic_query(low):
+        return False
     positive_phrases = (
         "carbon nanotube", "single wall", "single-walled", "graphene nanotube",
         "carbon black", "conductive additive", "antistatic additive", "anti-static additive",
@@ -779,7 +781,44 @@ def _is_business_relevant_query(query: str) -> bool:
         "additive", "additives", "filler", "fillers",
     }
     tokens = _tokens(low)
-    return any(p in low for p in positive_phrases) or len(tokens & positive_tokens) >= 2
+    has_relevant_material = any(p in low for p in positive_phrases) or len(tokens & positive_tokens) >= 2
+    return has_relevant_material and _has_buyer_context(low, tokens)
+
+
+def _is_navigational_or_too_generic_query(low: str) -> bool:
+    tokens = _tokens(low)
+    if any(brand in tokens for brand in ("ocsial", "tuball")):
+        if not any(t in tokens for t in ("vs", "alternative", "alternatives", "competitor", "competitors", "compare", "comparison")):
+            return True
+    generic_exact = {
+        "carbon nanotube", "carbon nanotubes", "single walled carbon nanotubes",
+        "single wall carbon nanotubes", "multi walled carbon nanotubes",
+        "multi wall carbon nanotubes", "swcnt", "mwcnt", "graphene nanotubes",
+    }
+    if normalize_query(low) in {normalize_query(x) for x in generic_exact}:
+        return True
+    generic_noise = ("structure", "formula", "definition", "meaning", "wikipedia", "wiki", "pdf", "ppt")
+    return any(term in tokens for term in generic_noise)
+
+
+def _has_buyer_context(low: str, tokens: set[str]) -> bool:
+    context_tokens = {
+        "additive", "additives", "supplier", "suppliers", "vendor", "vendors",
+        "manufacturer", "manufacturers", "companies", "buy", "purchase",
+        "vs", "compare", "comparison", "alternative", "alternatives",
+        "conductive", "conductivity", "antistatic", "anti-static", "esd",
+        "coating", "coatings", "rubber", "silicone", "plastic", "plastics",
+        "polymer", "polymers", "battery", "batteries", "electrode", "electrodes",
+        "epoxy", "adhesive", "adhesives", "flooring", "masterbatch", "dispersion",
+        "low", "dosage", "loading", "viscosity", "mechanical", "transparent",
+        "colored", "colour", "emi", "shielding",
+    }
+    context_phrases = (
+        "carbon black", "conductive silicone", "conductive rubber",
+        "conductive plastic", "conductive coating", "conductive epoxy",
+        "battery electrode", "esd floor", "anti static", "anti-static",
+    )
+    return bool(tokens & context_tokens) or any(phrase in low for phrase in context_phrases)
 
 
 def _buyer_prompt_from_query(query: str) -> str:
