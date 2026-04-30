@@ -650,12 +650,17 @@ class IntelligenceTests(unittest.TestCase):
             or "Processor Test" in (r["score_breakdown"].get("source_clusters") or [])
         ), None)
         self.assertIsNotNone(rec)
-        self.assertEqual(rec["score_breakdown"]["scope"], "cluster")
+        self.assertEqual(rec["score_breakdown"]["scope"], "opportunity")
         self.assertEqual(rec["score_breakdown"]["source"], "cluster_evidence")
-        self.assertGreaterEqual(rec["score_breakdown"]["prompt_count"], 2)
-        self.assertIn(risk_id, rec["score_breakdown"]["linked_prompt_ids"])
-        self.assertIn(gap_id, rec["score_breakdown"]["linked_prompt_ids"])
-        self.assertNotIn(unchecked_id, rec["score_breakdown"]["linked_prompt_ids"])
+        linked_ids = {
+            pid
+            for r in data["recommendations"]
+            if "Processor Test" in (r["score_breakdown"].get("source_clusters") or [])
+            for pid in r["score_breakdown"]["linked_prompt_ids"]
+        }
+        self.assertIn(risk_id, linked_ids)
+        self.assertIn(gap_id, linked_ids)
+        self.assertNotIn(unchecked_id, linked_ids)
         self.assertIn(rec["type"], {
             "Add Comparison Section",
             "Create Source Page",
@@ -686,9 +691,10 @@ class IntelligenceTests(unittest.TestCase):
                 "answer_quality_score": 3,
             })
         data = self.client.post("/recommendations/process-prompts").json()
-        rec = next(r for r in data["recommendations"] if r["score_breakdown"].get("cluster") == f"Comparison {suffix}")
+        rec = next(r for r in data["recommendations"] if f"Comparison {suffix}" in (r["score_breakdown"].get("source_clusters") or []))
         self.assertEqual(rec["type"], "Add Comparison Section")
         self.assertEqual(rec["score_breakdown"]["opportunity_type"], "Add Comparison Section")
+        self.assertIn("Competitor Dominated", rec["score_breakdown"]["failure_modes"])
 
     def test_recommendation_type_upgrade_existing_page_with_gsc_ga4_leverage(self):
         suffix = uuid.uuid4().hex[:8]
@@ -732,9 +738,10 @@ class IntelligenceTests(unittest.TestCase):
         finally:
             db.close()
         data = self.client.post("/recommendations/process-prompts").json()
-        rec = next(r for r in data["recommendations"] if r["score_breakdown"].get("cluster") == cluster)
+        rec = next(r for r in data["recommendations"] if cluster in (r["score_breakdown"].get("source_clusters") or []))
         self.assertEqual(rec["type"], "Upgrade Existing Page")
         self.assertTrue(rec["score_breakdown"]["target_pages"])
+        self.assertIn("Weak Existing Page", rec["score_breakdown"]["failure_modes"])
 
     def test_evidence_clusters_endpoint_returns_canonical_model(self):
         suffix = uuid.uuid4().hex[:8]

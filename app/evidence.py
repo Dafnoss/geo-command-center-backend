@@ -49,6 +49,45 @@ DOMAIN_TERMS = {
     "dosage", "loading", "viscosity",
 }
 
+PRODUCT_PATTERNS = (
+    ("TUBALL MATRIX", ("tuball matrix", "masterbatch")),
+    ("TUBALL / graphene nanotubes", ("tuball", "graphene nanotube", "graphene nanotubes")),
+    ("SWCNT additives", ("single-walled carbon nanotube", "single wall carbon nanotube", "swcnt")),
+    ("CNT additives", ("carbon nanotube", "carbon nanotubes", "cnt", "nanotube")),
+    ("Conductive additives", ("conductive additive", "conductive filler", "conductive agent")),
+    ("Anti-static / ESD additives", ("anti-static", "antistatic", "static electricity", "esd")),
+    ("Carbon black substitutes", ("carbon black", "conductive carbon black")),
+)
+
+APPLICATION_PATTERNS = (
+    ("silicone rubber", ("silicone rubber", "silicone")),
+    ("rubber and elastomers", ("elastomer", "elastomers", "rubber", "epdm", "fkm")),
+    ("plastics and polymers", ("plastic", "plastics", "polymer", "polymers", "pa ", "polyamide", "polycarbonate", "abs", "tpu")),
+    ("coatings and paints", ("coating", "coatings", "paint", "paints", "gelcoat", "flooring")),
+    ("epoxy and resins", ("epoxy", "resin", "thermoset")),
+    ("battery electrodes", ("battery", "batteries", "electrode", "cathode", "anode")),
+    ("adhesives and sealants", ("adhesive", "sealant")),
+    ("composites", ("composite", "composites", "lightweight")),
+    ("masterbatch and compounds", ("masterbatch", "compound", "compounds")),
+)
+
+INTENT_PATTERNS = (
+    ("supplier/vendor", ("supplier", "suppliers", "vendor", "vendors", "manufacturer", "manufacturers", "companies", "company", "procurement")),
+    ("comparison", (" vs ", " versus ", "compare", "comparison", "alternative", "alternatives")),
+    ("substitute/alternative", ("substitute", "replacement", "instead of", "alternative", "alternatives")),
+    ("safety/regulatory", ("safety", "regulatory", "regulation", "reach", "toxicity", "standard", "standards")),
+    ("application/use-case", ("what additive", "which additive", "best additive", "how to make", "application", "use case")),
+    ("performance", ("low dosage", "low loading", "color", "transparent", "mechanical", "viscosity", "conductivity", "uniform")),
+)
+
+SUBSTITUTE_PATTERNS = (
+    ("carbon black", ("carbon black", "conductive carbon black", "ketjenblack")),
+    ("MWCNT", ("mwcnt", "multi-walled carbon nanotube", "multi wall carbon nanotube", "multiwalled carbon nanotube")),
+    ("graphene", ("graphene nanoplatelet", "graphene nanoplatelets", "graphene")),
+    ("carbon fiber", ("carbon fiber", "carbon fibres", "carbon fibres")),
+    ("metal fillers", ("metal filler", "metal fillers", "metal powder", "metal powders")),
+)
+
 TECHNICAL_SOURCE_HINTS = (
     "science",
     "nature",
@@ -220,49 +259,148 @@ def _page_leverage_score(best_page: dict | None) -> int:
     return min(100, score)
 
 
+def _contains_any(text: str, needles: Iterable[str]) -> bool:
+    value = f" {text.lower()} "
+    return any(needle in value for needle in needles)
+
+
+def classify_opportunity(text: str, cluster: str = "") -> dict:
+    hay = re.sub(r"\s+", " ", f"{text or ''} {cluster or ''}".lower())
+    product_area = _first_pattern(hay, PRODUCT_PATTERNS) or "Conductive / anti-static additives"
+    application = _first_pattern(hay, APPLICATION_PATTERNS) or "general industrial materials"
+    buyer_intent = _first_pattern(hay, INTENT_PATTERNS) or "category education"
+    substitute_theme = _first_pattern(hay, SUBSTITUTE_PATTERNS) or ""
+
+    if substitute_theme and buyer_intent == "category education":
+        buyer_intent = "substitute/alternative"
+    if any(term in hay for term in ("best", "which", "what additive", "how to make")) and buyer_intent == "category education":
+        buyer_intent = "application/use-case"
+
+    label_parts = []
+    if application != "general industrial materials":
+        label_parts.append(_human_label(application))
+    label_parts.append(_human_label(product_area))
+    if buyer_intent not in ("category education", "application/use-case"):
+        label_parts.append(_human_label(buyer_intent))
+    if substitute_theme:
+        label_parts.append("vs " + _human_label(substitute_theme))
+
+    label = " / ".join(dict.fromkeys(label_parts))[:96] or _human_label(cluster or "GEO opportunity")
+    key = _slug("|".join([
+        product_area,
+        application,
+        buyer_intent,
+        substitute_theme,
+    ]))
+    return {
+        "opportunity_key": key,
+        "opportunity_label": label,
+        "product_area": product_area,
+        "application": application,
+        "buyer_intent": buyer_intent,
+        "substitute_theme": substitute_theme,
+    }
+
+
+def _first_pattern(text: str, patterns: Iterable[tuple[str, Iterable[str]]]) -> str:
+    for label, needles in patterns:
+        if _contains_any(text, needles):
+            return label
+    return ""
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-") or "general"
+
+
+def _substitute_hits(evidence: dict) -> int:
+    query_text = " ".join(q.get("query", "") for q in evidence.get("top_gsc_queries", []))
+    prompts_text = " ".join(evidence.get("linked_prompt_texts", []))
+    comp_text = " ".join(c.get("name", "") for c in evidence.get("top_competitors", []))
+    hay = f"{query_text} {prompts_text} {comp_text}".lower()
+    return sum(1 for term in SUBSTITUTE_TERMS if term in hay)
+
+
+def _technical_source_cited(evidence: dict) -> bool:
+    cited_domains = " ".join(d.get("domain", "") for d in evidence.get("top_external_sources", []))
+    return any(hint in cited_domains.lower() for hint in TECHNICAL_SOURCE_HINTS)
+
+
+def _failure_modes(evidence: dict) -> list[str]:
+    modes: list[str] = []
+    weak_count = evidence["gap_count"] + evidence["risk_count"]
+    best_page = evidence.get("best_existing_page")
+    if weak_count:
+        if evidence["brand_mention_rate"] < 50:
+            modes.append("No Brand Visibility")
+        if evidence["owned_citation_rate"] < 35:
+            modes.append("No Owned Citation")
+        if evidence["competitor_pressure_rate"] >= 35:
+            modes.append("Competitor Dominated")
+        if evidence.get("substitute_theme") or _substitute_hits(evidence) >= 1:
+            modes.append("Substitute Dominated")
+        if not best_page:
+            modes.append("No Matching Owned Page")
+        elif evidence["coverage_rate"] < 70 or evidence["owned_citation_rate"] < 45:
+            modes.append("Weak Existing Page")
+        if evidence["owned_citation_rate"] < 35 and _technical_source_cited(evidence):
+            modes.append("Weak Proof / Citation Asset")
+    return list(dict.fromkeys(modes))
+
+
 def _opportunity_type(evidence: dict) -> str:
     competitor_rate = evidence["competitor_pressure_rate"]
     owned_rate = evidence["owned_citation_rate"]
     best_page = evidence.get("best_existing_page")
+    modes = evidence.get("failure_modes") or _failure_modes(evidence)
     has_leverage = bool(best_page and (best_page.get("ga4_sessions", 0) >= 100 or best_page.get("gsc_impressions", 0) >= 100))
     query_text = " ".join(q["query"] for q in evidence.get("top_gsc_queries", []))
     prompts_text = " ".join(evidence.get("linked_prompt_texts", []))
-    cited_domains = " ".join(d["domain"] for d in evidence.get("top_external_sources", []))
-    substitute_hits = sum(1 for term in SUBSTITUTE_TERMS if term in (query_text + " " + prompts_text).lower())
+    substitute_hits = _substitute_hits(evidence)
+    buyer_intent = evidence.get("buyer_intent", "")
 
-    if has_leverage and evidence["gap_count"] + evidence["risk_count"] >= 1:
-        return "Upgrade Existing Page"
-    if competitor_rate >= 45:
-        return "Add Comparison Section"
-    if substitute_hits >= 2:
+    if "Substitute Dominated" in modes and (competitor_rate >= 25 or substitute_hits >= 1):
         return "Defend Substitute Positioning"
-    if "?" in prompts_text or any(w in query_text.lower() for w in ("best", "how", "what", "which", "compare")):
-        return "Add FAQ / Buyer Questions"
-    if owned_rate == 0 and any(hint in cited_domains.lower() for hint in TECHNICAL_SOURCE_HINTS):
+    if competitor_rate >= 45 or buyer_intent == "comparison":
+        return "Add Comparison Section"
+    if "Weak Proof / Citation Asset" in modes:
         return "Add Citation Proof"
+    if has_leverage and "Weak Existing Page" in modes:
+        return "Upgrade Existing Page"
+    if "No Matching Owned Page" in modes and evidence["run_count"] >= 2:
+        return "Create Source Page"
     if best_page and owned_rate < 35:
         return "Improve Internal Linking"
+    if "?" in prompts_text or any(w in query_text.lower() for w in ("best", "how", "what", "which", "compare")):
+        return "Add FAQ / Buyer Questions"
     if evidence["run_count"] >= 2:
         return "Create Source Page"
     return "Add Citation Proof"
 
 
-def _opportunity_title(opportunity_type: str, cluster: str, best_page: dict | None) -> str:
+def _opportunity_title(opportunity_type: str, cluster: str, best_page: dict | None, evidence: dict | None = None) -> str:
     cluster_label = _human_label(cluster)
+    evidence = evidence or {}
+    app = evidence.get("application")
+    product = evidence.get("product_area")
+    theme = evidence.get("substitute_theme")
+    topic = _human_label(" ".join(x for x in [app if app != "general industrial materials" else "", product or ""] if x).strip() or cluster_label)
     if opportunity_type == "Upgrade Existing Page" and best_page:
         label = _page_label(best_page)
-        return f"Upgrade page: {label}"
+        return f"Upgrade {label} for {topic}"
     if opportunity_type == "Add Comparison Section":
-        return f"Add competitor comparison for {cluster_label}"
+        suffix = f" vs {_human_label(theme)}" if theme else ""
+        return f"Add comparison content for {topic}{suffix}"
     if opportunity_type == "Add FAQ / Buyer Questions":
-        return f"Add buyer-question FAQ for {cluster_label}"
+        return f"Add buyer-question FAQ for {topic}"
     if opportunity_type == "Add Citation Proof":
-        return f"Make OCSiAl/TUBALL citable for {cluster_label}"
+        return f"Create citation proof for {topic}"
     if opportunity_type == "Improve Internal Linking":
-        return f"Strengthen internal links for {cluster_label}"
+        return f"Strengthen links to the {topic} source page"
     if opportunity_type == "Defend Substitute Positioning":
-        return f"Clarify TUBALL vs substitutes for {cluster_label}"
-    return f"Create source page for {cluster_label}"
+        substitute = _human_label(theme or "substitute materials")
+        return f"Defend TUBALL vs {substitute} for {topic}"
+    return f"Create source page for {topic}"
 
 
 def _page_label(page: dict) -> str:
@@ -350,8 +488,14 @@ def build_cluster_evidence(db: Session) -> list[dict]:
         confidence = min(95, 40 + min(total, 10) * 4 + (15 if gsc_rows else 0) + (15 if ga4_rows else 0))
         weights = EvidenceWeights(gap_severity, comp_pressure, search_score, page_score, business_score, confidence)
 
+        classifier = classify_opportunity(" ".join(p.prompt_text for p in plist[:12]), cluster)
         evidence = {
             "cluster": cluster,
+            "opportunity_key": classifier["opportunity_key"],
+            "product_area": classifier["product_area"],
+            "application": classifier["application"],
+            "buyer_intent": classifier["buyer_intent"],
+            "substitute_theme": classifier["substitute_theme"],
             "prompt_count": total,
             "run_count": total,
             "good_count": len(good),
@@ -382,8 +526,137 @@ def build_cluster_evidence(db: Session) -> list[dict]:
             "linked_prompt_texts": [p.prompt_text for p in plist[:8]],
             "priority_components": weights.__dict__ | {"priority_score": weights.priority_score},
         }
+        evidence["failure_modes"] = _failure_modes(evidence)
         evidence["opportunity_type"] = _opportunity_type(evidence)
-        evidence["opportunity_title"] = _opportunity_title(evidence["opportunity_type"], cluster, best_page)
+        evidence["opportunity_title"] = _opportunity_title(evidence["opportunity_type"], cluster, best_page, evidence)
+        out.append(evidence)
+
+    return sorted(out, key=lambda e: e["priority_components"]["priority_score"], reverse=True)
+
+
+def build_opportunity_evidence(db: Session) -> list[dict]:
+    """
+    Build recommendation-ready evidence around buyer opportunities, not raw
+    dashboard clusters. An opportunity is product/application/intent/substitute
+    context, which is the level at which a useful GEO action can be owned.
+    """
+    prompts = db.query(models.Prompt).all()
+    run_prompts = [p for p in prompts if is_run_prompt(p)]
+    groups: dict[str, dict] = {}
+    for prompt in run_prompts:
+        classifier = classify_opportunity(prompt.prompt_text, prompt.topic_cluster)
+        key = classifier["opportunity_key"]
+        row = groups.setdefault(key, {
+            **classifier,
+            "prompts": [],
+            "source_clusters": [],
+        })
+        row["prompts"].append(prompt)
+        if prompt.topic_cluster and prompt.topic_cluster not in row["source_clusters"]:
+            row["source_clusters"].append(prompt.topic_cluster)
+
+    gsc_all = db.query(models.GoogleSearchMetric).all()
+    ga4_all = db.query(models.GoogleAnalyticsMetric).all()
+    owned = owned_domains(db)
+    out: list[dict] = []
+
+    for key, group in groups.items():
+        plist = group["prompts"]
+        terms, specific_terms = _prompt_terms(plist)
+        terms |= _norm_words(" ".join([
+            group.get("product_area", ""),
+            group.get("application", ""),
+            group.get("buyer_intent", ""),
+            group.get("substitute_theme", ""),
+        ]))
+        specific_terms |= {t for t in _norm_words(" ".join([
+            group.get("product_area", ""),
+            group.get("application", ""),
+            group.get("substitute_theme", ""),
+        ])) if t not in GENERIC_TERMS}
+
+        good = [p for p in plist if p.monitor_status == "Good"]
+        risk = [p for p in plist if p.monitor_status == "Risk"]
+        gap = [p for p in plist if p.monitor_status == "Gap"]
+        covered = [p for p in plist if is_visible_prompt(p)]
+        brand = [p for p in plist if p.brand_mentioned or p.product_mentioned]
+        owned_cited = [p for p in plist if p.domain_cited]
+        comp_prompts = [p for p in plist if p.competitors_mentioned]
+        competitor_counts = Counter(c for p in plist for c in (p.competitors_mentioned or []))
+        external_sources = Counter()
+        owned_sources = Counter()
+        for p in plist:
+            for src in p.cited_sources or []:
+                d = domain_of(src)
+                if not d:
+                    continue
+                if domain_matches_owned(d, owned):
+                    owned_sources[d] += 1
+                else:
+                    external_sources[d] += 1
+
+        gsc_rows = [row for row in gsc_all if _matches_terms(row.query + " " + row.page, terms, specific_terms)]
+        ga4_rows = [row for row in ga4_all if _matches_terms((row.page_path or "") + " " + (row.page_title or ""), terms, specific_terms)]
+        gsc_impressions = sum(r.impressions or 0 for r in gsc_rows)
+        gsc_clicks = sum(r.clicks or 0 for r in gsc_rows)
+        pos_weight = sum(max(r.impressions or 0, 1) for r in gsc_rows)
+        gsc_avg_position = round(sum((r.avg_position or 0) * max(r.impressions or 0, 1) for r in gsc_rows) / pos_weight, 1) if pos_weight else 0
+        ga4_sessions = sum(r.sessions or 0 for r in ga4_rows)
+        ga4_users = sum(r.active_users or 0 for r in ga4_rows)
+        best_page = _best_existing_page(gsc_rows, ga4_rows)
+        total = len(plist)
+        max_priority = max((p.business_priority or 1 for p in plist), default=1)
+
+        gap_severity = round(((len(gap) * 1.0 + len(risk) * 0.7) / total) * 100) if total else 0
+        comp_pressure = round(len(comp_prompts) / total * 100) if total else 0
+        search_score = _search_demand_score(gsc_impressions, gsc_clicks, gsc_avg_position)
+        page_score = _page_leverage_score(best_page)
+        business_score = min(100, max_priority * 20)
+        confidence = min(95, 45 + min(total, 8) * 5 + (15 if gsc_rows else 0) + (15 if ga4_rows else 0))
+        weights = EvidenceWeights(gap_severity, comp_pressure, search_score, page_score, business_score, confidence)
+
+        label = group.get("opportunity_label") or _human_label(key)
+        evidence = {
+            "cluster": label,
+            "opportunity_key": key,
+            "product_area": group.get("product_area"),
+            "application": group.get("application"),
+            "buyer_intent": group.get("buyer_intent"),
+            "substitute_theme": group.get("substitute_theme"),
+            "source_clusters": group.get("source_clusters", []),
+            "prompt_count": total,
+            "run_count": total,
+            "good_count": len(good),
+            "risk_count": len(risk),
+            "gap_count": len(gap),
+            "coverage_rate": round(len(covered) / total * 100) if total else 0,
+            "brand_mention_rate": round(len(brand) / total * 100) if total else 0,
+            "owned_citation_rate": round(len(owned_cited) / total * 100) if total else 0,
+            "competitor_pressure_rate": comp_pressure,
+            "top_competitors": _top_dict(competitor_counts),
+            "top_external_sources": [{"domain": k, "count": v} for k, v in external_sources.most_common(8)],
+            "top_owned_sources": [{"domain": k, "count": v} for k, v in owned_sources.most_common(8)],
+            "gsc_impressions": gsc_impressions,
+            "gsc_clicks": gsc_clicks,
+            "gsc_avg_position": gsc_avg_position,
+            "ga4_sessions": ga4_sessions,
+            "ga4_users": ga4_users,
+            "top_gsc_queries": [
+                {"metric_id": r.metric_id, "query": r.query, "page": r.page, "impressions": r.impressions, "clicks": r.clicks, "avg_position": r.avg_position}
+                for r in sorted(gsc_rows, key=lambda r: r.impressions or 0, reverse=True)[:10]
+            ],
+            "top_ga4_pages": [
+                {"metric_id": r.metric_id, "page_path": r.page_path, "page_title": r.page_title, "sessions": r.sessions, "active_users": r.active_users}
+                for r in sorted(ga4_rows, key=lambda r: r.sessions or 0, reverse=True)[:10]
+            ],
+            "best_existing_page": best_page,
+            "linked_prompt_ids": [p.prompt_id for p in plist],
+            "linked_prompt_texts": [p.prompt_text for p in plist],
+            "priority_components": weights.__dict__ | {"priority_score": weights.priority_score},
+        }
+        evidence["failure_modes"] = _failure_modes(evidence)
+        evidence["opportunity_type"] = _opportunity_type(evidence)
+        evidence["opportunity_title"] = _opportunity_title(evidence["opportunity_type"], label, best_page, evidence)
         out.append(evidence)
 
     return sorted(out, key=lambda e: e["priority_components"]["priority_score"], reverse=True)

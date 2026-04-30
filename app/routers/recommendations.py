@@ -61,8 +61,8 @@ def recommendation_summary(db: Session = Depends(get_db)):
         high_priority=sum(1 for r in active if r.priority_score >= 80),
         gap_driven=sum(1 for r in active if (r.score_breakdown or {}).get("gap_count", 0) > 0),
         risk_driven=sum(1 for r in active if (r.score_breakdown or {}).get("risk_count", 0) > 0),
-        cluster_level=sum(1 for r in active if (r.score_breakdown or {}).get("scope") == "cluster"),
-        prompt_level=sum(1 for r in active if (r.score_breakdown or {}).get("scope") != "cluster"),
+        cluster_level=sum(1 for r in active if (r.score_breakdown or {}).get("scope") in ("cluster", "opportunity")),
+        prompt_level=sum(1 for r in active if (r.score_breakdown or {}).get("scope") not in ("cluster", "opportunity")),
         approved_or_done=sum(1 for r in rows if r.status in ("Accepted", "In Progress", "Done", "Approved", "Task created")),
         rejected=sum(1 for r in rows if r.status in ("Rejected", "Stale")),
     )

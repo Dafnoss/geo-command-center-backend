@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.config import settings as app_settings
-from app.evidence import build_cluster_evidence
+from app.evidence import build_opportunity_evidence
 from app.scoring import recommendation_priority_score
 
 
@@ -325,12 +325,12 @@ def _matching_analytics_metrics(db: Session, prompts: list[models.Prompt], limit
 
 def process_prompt_evidence_recommendations(db: Session) -> dict:
     """Create deterministic strategic recommendations from canonical evidence."""
-    all_evidence = build_cluster_evidence(db)
+    all_evidence = build_opportunity_evidence(db)
     weak_evidence = [
         e for e in all_evidence
         if (e["gap_count"] + e["risk_count"]) > 0
     ]
-    selected_evidence = _select_strategic_opportunities(weak_evidence, limit=10)
+    selected_evidence = _select_strategic_opportunities(weak_evidence, limit=8)
 
     active_keys = {e["recommendation_key"] for e in selected_evidence}
     rejected_stale = 0
@@ -444,7 +444,11 @@ def _select_strategic_opportunities(items: list[dict], limit: int = 10) -> list[
         key=lambda e: e["priority_components"]["priority_score"],
         reverse=True,
     )
-    high_quality = [item for item in ranked if item["priority_components"]["priority_score"] >= 50]
+    high_quality = [
+        item for item in ranked
+        if item["priority_components"]["priority_score"] >= 55
+        and (item["gap_count"] + item["risk_count"]) > 0
+    ]
     return (high_quality or ranked[:3])[:limit]
 
 
@@ -452,29 +456,44 @@ def _opportunity_key(item: dict) -> str:
     best_page = item.get("best_existing_page") or {}
     page_url = best_page.get("url")
     if item.get("opportunity_type") == "Upgrade Existing Page" and page_url:
-        return "page:" + page_url
-    return f"cluster:{item.get('opportunity_type')}:{item.get('cluster')}"
+        return "page:" + _page_key(best_page)
+    base = item.get("opportunity_key") or item.get("cluster")
+    return f"opportunity:{item.get('opportunity_type')}:{base}"
 
 
 def _legacy_recommendation_key(meta: dict) -> str:
     target_pages = meta.get("target_pages") or []
     page_url = target_pages[0].get("url") if target_pages and isinstance(target_pages[0], dict) else None
     if meta.get("opportunity_type") == "Upgrade Existing Page" and page_url:
-        return "page:" + page_url
-    return f"cluster:{meta.get('opportunity_type')}:{meta.get('cluster')}"
+        return "page:" + _page_key(target_pages[0])
+    base = meta.get("opportunity_key") or meta.get("cluster")
+    return f"opportunity:{meta.get('opportunity_type')}:{base}"
+
+
+def _page_key(page: dict) -> str:
+    raw = (page.get("url") or "").strip().lower()
+    if raw:
+        return raw.split("?")[0].rstrip("/")
+    return (page.get("title") or "existing-page").strip().lower()
 
 
 def _clone_opportunity(item: dict, key: str) -> dict:
     out = dict(item)
     out["recommendation_key"] = key
-    out["source_clusters"] = [item["cluster"]]
+    out["source_clusters"] = list(item.get("source_clusters") or [item["cluster"]])
+    out["source_opportunities"] = [item["cluster"]]
     return out
 
 
 def _merge_opportunity(base: dict, item: dict) -> None:
-    clusters = list(dict.fromkeys(base.get("source_clusters", []) + [item["cluster"]]))
+    clusters = list(dict.fromkeys(base.get("source_clusters", []) + (item.get("source_clusters") or [item["cluster"]])))
+    opportunities = list(dict.fromkeys(base.get("source_opportunities", [base["cluster"]]) + [item["cluster"]]))
     base["source_clusters"] = clusters
-    base["cluster"] = _cluster_group_label(clusters)
+    base["source_opportunities"] = opportunities
+    if base.get("opportunity_type") == "Upgrade Existing Page":
+        base["cluster"] = _cluster_group_label(opportunities, noun="opportunity areas")
+    else:
+        base["cluster"] = _cluster_group_label(opportunities)
     base["run_count"] += item["run_count"]
     base["good_count"] += item["good_count"]
     base["risk_count"] += item["risk_count"]
@@ -496,6 +515,7 @@ def _merge_opportunity(base: dict, item: dict) -> None:
     base["top_owned_sources"] = _merge_named_counts(base["top_owned_sources"], item["top_owned_sources"], "domain")
     base["top_gsc_queries"] = _merge_metric_rows(base["top_gsc_queries"], item["top_gsc_queries"], "metric_id", "impressions")
     base["top_ga4_pages"] = _merge_metric_rows(base["top_ga4_pages"], item["top_ga4_pages"], "metric_id", "sessions")
+    base["failure_modes"] = _unique((base.get("failure_modes") or []) + (item.get("failure_modes") or []))
     base["gsc_impressions"] = sum(r.get("impressions") or 0 for r in base["top_gsc_queries"])
     base["gsc_clicks"] = sum(r.get("clicks") or 0 for r in base["top_gsc_queries"])
     pos_weight = sum(max(r.get("impressions") or 0, 1) for r in base["top_gsc_queries"])
@@ -538,10 +558,10 @@ def _merged_title(item: dict) -> str:
     return item.get("opportunity_title") or f"Improve {item['cluster']} AI visibility"
 
 
-def _cluster_group_label(clusters: list[str]) -> str:
+def _cluster_group_label(clusters: list[str], noun: str = "clusters") -> str:
     if len(clusters) == 1:
         return clusters[0]
-    return f"{len(clusters)} clusters"
+    return f"{len(clusters)} {noun}"
 
 
 def _rate_from_count(count: float, total: int) -> int:
@@ -577,8 +597,12 @@ def _strategic_evidence(item: dict) -> list[str]:
         f"AI coverage is {item['coverage_rate']}%; brand mention is {item['brand_mention_rate']}%; owned citation is {item['owned_citation_rate']}%.",
         f"Competitor pressure is {item['competitor_pressure_rate']}%.",
     ]
+    if item.get("failure_modes"):
+        evidence.append("Failure modes: " + ", ".join(item["failure_modes"][:5]) + ".")
+    if len(item.get("source_opportunities", [])) > 1:
+        evidence.append("Combines opportunity areas: " + ", ".join(item["source_opportunities"][:5]) + ("." if len(item["source_opportunities"]) <= 5 else f", +{len(item['source_opportunities']) - 5} more."))
     if len(item.get("source_clusters", [])) > 1:
-        evidence.append("Covers clusters: " + ", ".join(item["source_clusters"][:6]) + ("." if len(item["source_clusters"]) <= 6 else f", +{len(item['source_clusters']) - 6} more."))
+        evidence.append("Prompt clusters represented: " + ", ".join(item["source_clusters"][:6]) + ("." if len(item["source_clusters"]) <= 6 else f", +{len(item['source_clusters']) - 6} more."))
     if item["top_competitors"]:
         evidence.append("Top competitors: " + ", ".join(x["name"] for x in item["top_competitors"][:4]) + ".")
     if item["top_external_sources"]:
@@ -598,11 +622,12 @@ def _strategic_evidence(item: dict) -> list[str]:
 def _strategic_diagnosis(item: dict) -> str:
     cluster = item["cluster"]
     typ = item["opportunity_type"]
-    subject = "This combined opportunity" if len(item.get("source_clusters", [])) > 1 else cluster
+    subject = "This combined opportunity" if len(item.get("source_opportunities", [])) > 1 else cluster
+    failure = ", ".join(item.get("failure_modes", [])[:3]) or "AI visibility weakness"
     return (
-        f"{subject} has a measurable GEO opportunity: {item['coverage_rate']}% coverage, "
+        f"{subject} is blocked by {failure.lower()}: {item['coverage_rate']}% coverage, "
         f"{item['owned_citation_rate']}% owned-source citation, and {item['competitor_pressure_rate']}% competitor pressure. "
-        f"The best next move is {typ.lower()} because the evidence combines LLM answer gaps with search/traffic data."
+        f"The best next move is {typ.lower()} because this action matches the dominant failure mode and available search/traffic leverage."
     )
 
 
@@ -611,15 +636,23 @@ def _strategic_actions(item: dict) -> list[str]:
     typ = item["opportunity_type"]
     best_page = item.get("best_existing_page") or {}
     actions = []
-    if typ == "Upgrade Existing Page" and best_page:
-        actions.append(f"Upgrade the existing page candidate: {best_page.get('url') or best_page.get('title')}.")
+    target = best_page.get("url") or best_page.get("title")
+    if typ == "Upgrade Existing Page" and target:
+        actions.append(f"Upgrade the existing page candidate: {target}.")
     elif typ == "Create Source Page":
         actions.append(f"Create one authoritative OCSiAl/TUBALL source page for {cluster}.")
+    elif target:
+        actions.append(f"Use {target} as the primary implementation surface unless a better page exists.")
     else:
         actions.append(f"Create or update a focused {cluster} content asset.")
+
     if typ in ("Add Comparison Section", "Defend Substitute Positioning") or item["competitor_pressure_rate"] >= 35:
         comps = ", ".join(x["name"] for x in item["top_competitors"][:4]) or "the cited competitors/substitutes"
         actions.append(f"Add a direct comparison section against {comps}.")
+
+    if typ == "Defend Substitute Positioning" and item.get("substitute_theme"):
+        actions.append(f"State when TUBALL is preferable to {item['substitute_theme']}: lower loading, conductivity stability, color/mechanical retention, and processing constraints.")
+
     if typ == "Add FAQ / Buyer Questions" or item["top_gsc_queries"]:
         seen_qs = set()
         qs = []
@@ -633,6 +666,9 @@ def _strategic_actions(item: dict) -> list[str]:
         actions.append("Add FAQ/H2 blocks matching buyer questions" + (": " + "; ".join(qs) if qs else "."))
     if typ in ("Add Citation Proof", "Create Source Page") or item["owned_citation_rate"] < 35:
         actions.append("Add citation-friendly proof: dosage ranges, use cases, material compatibility, claims, and source-style references.")
+    if item["top_external_sources"] and item["owned_citation_rate"] < 50:
+        domains = ", ".join(x["domain"] for x in item["top_external_sources"][:3])
+        actions.append(f"Use the cited-source pattern from {domains} to decide what evidence format AI currently trusts.")
     actions.extend([
         "Mention OCSiAl and TUBALL early and consistently; treat TUBALL as the product line under OCSiAl.",
         "Internally link the asset from relevant OCSiAl/TUBALL application and product pages.",
@@ -643,7 +679,7 @@ def _strategic_actions(item: dict) -> list[str]:
 
 def _strategic_acceptance(item: dict) -> list[str]:
     return [
-        f"Asset directly answers at least {min(5, max(1, item['run_count']))} monitored prompts in {item['cluster']}.",
+        f"Asset or page section directly answers at least {min(5, max(1, item['run_count']))} linked monitored prompts.",
         "Includes OCSiAl, TUBALL, owned-domain references, and source/citation language.",
         "Includes comparison or substitute positioning when competitor pressure is above 30%.",
         "After rerun, linked cluster coverage improves or at least one Gap/Risk prompt becomes Good.",
@@ -652,7 +688,7 @@ def _strategic_acceptance(item: dict) -> list[str]:
 
 def _strategic_impact(item: dict) -> str:
     return (
-        f"Improve coverage across {item['run_count']} monitored {item['cluster']} prompts "
+        f"Improve coverage across {item['run_count']} linked monitored prompts "
         f"and increase owned-source citation from {item['owned_citation_rate']}%."
     )
 
@@ -661,11 +697,18 @@ def _recommendation_meta(item: dict) -> dict:
     components = item["priority_components"]
     return {
         "source": "cluster_evidence",
-        "scope": "cluster",
+        "scope": "opportunity",
         "recommendation_key": item["recommendation_key"],
+        "opportunity_key": item.get("opportunity_key"),
         "opportunity_type": item["opportunity_type"],
         "cluster": item["cluster"],
         "source_clusters": item.get("source_clusters", [item["cluster"]]),
+        "source_opportunities": item.get("source_opportunities", [item["cluster"]]),
+        "product_area": item.get("product_area"),
+        "application": item.get("application"),
+        "buyer_intent": item.get("buyer_intent"),
+        "substitute_theme": item.get("substitute_theme"),
+        "failure_modes": item.get("failure_modes", []),
         "prompt_count": item["run_count"],
         "gap_count": item["gap_count"],
         "risk_count": item["risk_count"],
@@ -685,8 +728,11 @@ def _recommendation_meta(item: dict) -> dict:
         "confidence": components["confidence"],
         "target_pages": [item["best_existing_page"]] if item.get("best_existing_page") else [],
         "linked_prompt_ids": item["linked_prompt_ids"],
+        "linked_prompt_texts": item.get("linked_prompt_texts", []),
         "linked_gsc_metric_ids": [q["metric_id"] for q in item["top_gsc_queries"]],
         "linked_ga4_metric_ids": [p["metric_id"] for p in item["top_ga4_pages"]],
+        "top_gsc_queries": item["top_gsc_queries"],
+        "top_ga4_pages": item["top_ga4_pages"],
         "top_competitors": item["top_competitors"],
         "top_external_sources": item["top_external_sources"],
         "top_owned_sources": item["top_owned_sources"],
