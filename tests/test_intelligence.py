@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app import intelligence  # noqa: E402
 from app import models  # noqa: E402
 from app import prompt_research  # noqa: E402
+from app import source_utils  # noqa: E402
 from app.traffic import classify_ai_source  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
@@ -66,6 +67,65 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(derive_monitor_status(visible=False, competitors=["Cabot"], domain_cited=True), "Good")
         self.assertEqual(derive_monitor_status(visible=False, competitors=["Cabot"]), "Risk")
         self.assertEqual(derive_monitor_status(visible=False, competitors=[]), "Gap")
+
+    def test_sources_merge_by_domain_and_repoint_references(self):
+        suffix = uuid.uuid4().hex[:8]
+        db = SessionLocal()
+        try:
+            keep = models.Source(
+                source_id=f"SRC-A-{suffix}",
+                source_url="https://www.example.com/path-a",
+                domain="example.com",
+                title="Example A",
+                source_type="Industry media",
+                cited_by_prompts=["P001"],
+                mentions_brand=False,
+                mentions_product=False,
+                mentions_competitor=True,
+                links_to_owned_domain=False,
+                source_influence_score=40,
+                updated="2026-04-01",
+            )
+            dup = models.Source(
+                source_id=f"SRC-B-{suffix}",
+                source_url="http://example.com/path-b?utm=1",
+                domain="example.com",
+                title="Example B",
+                source_type="Supplier list",
+                cited_by_prompts=["P002", "P001"],
+                mentions_brand=True,
+                mentions_product=True,
+                mentions_competitor=False,
+                links_to_owned_domain=True,
+                source_influence_score=50,
+                updated="2026-04-02",
+            )
+            rec = models.Recommendation(
+                recommendation_id=f"REC-SRC-{suffix}",
+                title="Source rec",
+                type="Add citations/sources",
+                priority_score=50,
+                status="New",
+                related_source_id=dup.source_id,
+            )
+            db.add_all([keep, dup, rec])
+            db.commit()
+            merged = source_utils.merge_sources_by_domain(db, owned_domains=["example.com"])
+            self.assertEqual(merged, 1)
+            rows = db.query(models.Source).filter(models.Source.domain == "example.com").all()
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row.source_url, "https://example.com")
+            self.assertEqual(row.source_type, "Supplier list")
+            self.assertEqual(sorted(row.cited_by_prompts), ["P001", "P002"])
+            self.assertTrue(row.mentions_brand)
+            self.assertTrue(row.mentions_product)
+            self.assertTrue(row.mentions_competitor)
+            self.assertTrue(row.links_to_owned_domain)
+            db.refresh(rec)
+            self.assertEqual(rec.related_source_id, row.source_id)
+        finally:
+            db.close()
 
     def test_prompt_research_run_and_apply_reviewed_changes(self):
         suffix = uuid.uuid4().hex[:8]

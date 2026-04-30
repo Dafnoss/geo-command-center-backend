@@ -26,6 +26,7 @@ from app.visibility import (
     domain_matches_owned,
     domain_of,
 )
+from app.source_utils import canonical_source_url, merge_source_types
 
 
 URL_RE = re.compile(r"https?://[^\s)>\]\"']+", re.IGNORECASE)
@@ -199,22 +200,26 @@ def run_query(db: Session, prompt: models.Prompt) -> dict:
         d = _domain_of(u)
         if not d:
             continue
-        existing = db.query(models.Source).filter_by(source_url=u).one_or_none()
+        canonical_url = canonical_source_url(d)
+        owned = domain_matches_owned(d, owned_domains)
+        existing = db.query(models.Source).filter_by(domain=d).one_or_none()
         if existing:
             cited_by = list(existing.cited_by_prompts or [])
             if prompt.prompt_id not in cited_by:
                 cited_by.append(prompt.prompt_id)
                 existing.cited_by_prompts = cited_by
+            existing.source_url = canonical_url
+            existing.title = d
             existing.updated = date.today().isoformat()
             existing.mentions_brand      = existing.mentions_brand      or brand_in
             existing.mentions_product    = existing.mentions_product    or product_in
             existing.mentions_competitor = existing.mentions_competitor or bool(comps)
-            existing.links_to_owned_domain = existing.links_to_owned_domain or domain_matches_owned(d, owned_domains)
+            existing.links_to_owned_domain = existing.links_to_owned_domain or owned
+            existing.source_type = merge_source_types([existing.source_type, "Supplier list" if owned else "Industry media"], owned=existing.links_to_owned_domain)
         else:
-            owned = domain_matches_owned(d, owned_domains)
             db.add(models.Source(
                 source_id=f"S-{uuid.uuid4().hex[:8].upper()}",
-                source_url=u,
+                source_url=canonical_url,
                 domain=d,
                 title=d,
                 source_type="Industry media" if not owned else "Supplier list",

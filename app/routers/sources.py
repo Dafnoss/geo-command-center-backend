@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.database import get_db
+from app.source_utils import merge_sources_by_domain
 
 
 router = APIRouter(prefix="/sources", tags=["sources"])
@@ -23,6 +24,7 @@ def list_sources(
     outreach_status: Optional[str] = None,
     search: Optional[str] = None,
 ):
+    merge_sources_by_domain(db)
     q = db.query(models.Source)
     if source_type:
         q = q.filter(models.Source.source_type == source_type)
