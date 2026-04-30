@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections import defaultdict
 from datetime import datetime
 from typing import List, Optional
 
@@ -449,7 +450,24 @@ def _select_strategic_opportunities(items: list[dict], limit: int = 10) -> list[
         if item["priority_components"]["priority_score"] >= 55
         and (item["gap_count"] + item["risk_count"]) > 0
     ]
-    return (high_quality or ranked[:3])[:limit]
+    candidates = high_quality or ranked[:3]
+    selected: list[dict] = []
+    type_counts: dict[str, int] = defaultdict(int)
+    for item in candidates:
+        typ = item.get("opportunity_type") or "Other"
+        if type_counts[typ] >= _max_active_per_type(typ):
+            continue
+        selected.append(item)
+        type_counts[typ] += 1
+        if len(selected) >= limit:
+            break
+    return selected or candidates[:min(3, limit)]
+
+
+def _max_active_per_type(typ: str) -> int:
+    if typ in ("Defend Substitute Positioning", "Add Comparison Section", "Upgrade Existing Page"):
+        return 2
+    return 3
 
 
 def _opportunity_key(item: dict) -> str:
@@ -457,6 +475,12 @@ def _opportunity_key(item: dict) -> str:
     page_url = best_page.get("url")
     if item.get("opportunity_type") == "Upgrade Existing Page" and page_url:
         return "page:" + _page_key(best_page)
+    if item.get("opportunity_type") == "Defend Substitute Positioning":
+        theme = item.get("substitute_theme") or "substitute-materials"
+        return "strategy:defend-substitute:" + str(theme).lower()
+    if item.get("opportunity_type") == "Add Comparison Section":
+        theme = item.get("substitute_theme") or item.get("product_area") or "comparison"
+        return "strategy:comparison:" + str(theme).lower()
     base = item.get("opportunity_key") or item.get("cluster")
     return f"opportunity:{item.get('opportunity_type')}:{base}"
 
@@ -555,6 +579,16 @@ def _merged_title(item: dict) -> str:
     if item.get("opportunity_type") == "Upgrade Existing Page" and item.get("best_existing_page"):
         title = item.get("opportunity_title", "")
         return title
+    if item.get("opportunity_type") == "Defend Substitute Positioning":
+        count = len(item.get("source_opportunities", []))
+        theme = item.get("substitute_theme") or "substitute materials"
+        if count > 1:
+            return f"Defend TUBALL vs {theme} across {count} buyer opportunity areas"
+    if item.get("opportunity_type") == "Add Comparison Section":
+        count = len(item.get("source_opportunities", []))
+        theme = item.get("substitute_theme") or item.get("product_area") or "competitors"
+        if count > 1:
+            return f"Build comparison content against {theme} across {count} opportunity areas"
     return item.get("opportunity_title") or f"Improve {item['cluster']} AI visibility"
 
 
