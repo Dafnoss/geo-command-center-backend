@@ -103,6 +103,21 @@ TECHNICAL_SOURCE_HINTS = (
     "astm",
 )
 
+NOISY_QUERY_PATTERNS = (
+    re.compile(r"^\s*(what\s+(is|are)\s+)?(carbon black|graphene|carbon nanotubes?|cnt)\s+(used for|uses|production|meaning|definition)\??\s*$", re.I),
+    re.compile(r"^\s*(ocsial|tuball|tuball matrix|ocsial\.com|tuball\.com)\s*$", re.I),
+    re.compile(r"\b(where to order|factory that produced|factory that produces)\b", re.I),
+)
+
+UNRELATED_QUERY_TERMS = {
+    "career", "careers", "jobs", "vacancy", "salary", "ppe", "glove",
+    "gloves", "fabric", "fabrics", "textile", "textiles", "clothing",
+    "powder coating gun", "anti static bag", "paa box", "novatic",
+}
+
+MIN_RELEVANT_EVIDENCE_SCORE = 35
+MIN_TARGET_PAGE_SCORE = 60
+
 
 @dataclass
 class EvidenceWeights:
@@ -160,18 +175,136 @@ def _prompt_terms(prompts: Iterable[models.Prompt]) -> tuple[set[str], set[str]]
 
 
 def _matches_terms(text: str, terms: set[str], specific_terms: set[str]) -> bool:
+    return _evidence_match_score(text, "", terms, specific_terms, {}) >= MIN_RELEVANT_EVIDENCE_SCORE
+
+
+def _query_noise_reason(query: str, classifier: dict) -> str:
+    q = re.sub(r"\s+", " ", (query or "").strip().lower())
+    if not q:
+        return ""
+    for pattern in NOISY_QUERY_PATTERNS:
+        if pattern.search(q):
+            return "generic_or_navigation_query"
+    intent = (classifier.get("buyer_intent") or "").lower()
+    application = (classifier.get("application") or "").lower()
+    if "standard" in q and intent != "safety/regulatory":
+        return "standards_query_outside_regulatory_context"
+    for term in UNRELATED_QUERY_TERMS:
+        if term in q:
+            if term in {"fabric", "fabrics", "textile", "textiles"} and "textile" in application:
+                continue
+            return "outside_business_scope"
+    return ""
+
+
+def _evidence_match_score(
+    text: str,
+    query: str,
+    terms: set[str],
+    specific_terms: set[str],
+    classifier: dict,
+) -> int:
     if not terms:
-        return False
-    words = _norm_words(text)
-    specific_overlap = words & specific_terms
+        return 0
+    noise = _query_noise_reason(query, classifier)
+    if noise:
+        return 0
+    value = (text or "").lower()
+    words = _norm_words(value)
+    if not words:
+        return 0
+
+    product_terms = _norm_words(classifier.get("product_area", ""))
+    application_terms = _norm_words(classifier.get("application", ""))
+    intent_terms = _norm_words(classifier.get("buyer_intent", ""))
+    substitute_terms = _norm_words(classifier.get("substitute_theme", ""))
+    specific_overlap = words & {t for t in specific_terms if t not in GENERIC_TERMS}
     domain_overlap = words & DOMAIN_TERMS & terms
-    if len(specific_overlap) >= 2:
-        return True
-    if len(words & terms) >= 4:
-        return True
-    if len(domain_overlap) >= 1 and len(words & terms) >= 3:
-        return True
-    return False
+
+    score = 0
+    score += min(32, len(specific_overlap) * 14)
+    score += min(28, len(words & product_terms) * 12)
+    score += min(30, len(words & application_terms) * 18)
+    score += min(24, len(words & substitute_terms) * 18)
+    score += min(14, len(words & intent_terms) * 7)
+    score += min(12, len(domain_overlap) * 6)
+
+    # Phrase matches help owned page URLs/titles score strongly when the words
+    # are meaningful but individually generic, e.g. conductive additive pages.
+    for label in (
+        classifier.get("product_area", ""),
+        classifier.get("application", ""),
+        classifier.get("substitute_theme", ""),
+    ):
+        clean = (label or "").lower()
+        if clean and clean != "general industrial materials" and clean in value:
+            score += 18
+
+    # Avoid letting one broad material term select a target page.
+    if len(specific_overlap | domain_overlap | (words & product_terms) | (words & application_terms) | (words & substitute_terms)) < 2:
+        return min(score, 28)
+    return min(100, score)
+
+
+def _filter_gsc_rows(
+    rows: list[models.GoogleSearchMetric],
+    terms: set[str],
+    specific_terms: set[str],
+    classifier: dict,
+) -> tuple[list[models.GoogleSearchMetric], int, list[dict]]:
+    accepted: list[models.GoogleSearchMetric] = []
+    filtered = 0
+    diagnostics: list[dict] = []
+    for row in rows:
+        text = " ".join([row.query or "", row.page or ""])
+        score = _evidence_match_score(text, row.query or "", terms, specific_terms, classifier)
+        reason = _query_noise_reason(row.query or "", classifier)
+        if score >= MIN_RELEVANT_EVIDENCE_SCORE:
+            setattr(row, "_match_score", score)
+            accepted.append(row)
+        else:
+            filtered += 1
+            if len(diagnostics) < 10:
+                diagnostics.append({
+                    "metric_id": row.metric_id,
+                    "query": row.query,
+                    "page": row.page,
+                    "score": score,
+                    "reason": reason or "weak_relevance_match",
+                    "impressions": row.impressions,
+                    "clicks": row.clicks,
+                })
+    return accepted, filtered, diagnostics
+
+
+def _filter_ga4_rows(
+    rows: list[models.GoogleAnalyticsMetric],
+    terms: set[str],
+    specific_terms: set[str],
+    classifier: dict,
+) -> tuple[list[models.GoogleAnalyticsMetric], int, list[dict]]:
+    accepted: list[models.GoogleAnalyticsMetric] = []
+    filtered = 0
+    diagnostics: list[dict] = []
+    for row in rows:
+        text = " ".join([row.page_path or "", row.page_title or ""])
+        score = _evidence_match_score(text, "", terms, specific_terms, classifier)
+        if score >= MIN_RELEVANT_EVIDENCE_SCORE:
+            setattr(row, "_match_score", score)
+            accepted.append(row)
+        else:
+            filtered += 1
+            if len(diagnostics) < 10:
+                diagnostics.append({
+                    "metric_id": row.metric_id,
+                    "page_path": row.page_path,
+                    "page_title": row.page_title,
+                    "score": score,
+                    "reason": "weak_relevance_match",
+                    "sessions": row.sessions,
+                    "active_users": row.active_users,
+                })
+    return accepted, filtered, diagnostics
 
 
 def _top_dict(counter: Counter, limit: int = 8) -> list[dict]:
@@ -193,7 +326,9 @@ def _best_existing_page(gsc_rows: list[models.GoogleSearchMetric], ga4_rows: lis
             "ga4_sessions": 0,
             "ga4_users": 0,
             "_pos_weight": 0,
+            "_match_scores": [],
         })
+        p["_match_scores"].append(getattr(row, "_match_score", MIN_RELEVANT_EVIDENCE_SCORE))
         p["gsc_impressions"] += row.impressions or 0
         p["gsc_clicks"] += row.clicks or 0
         weight = max(row.impressions or 0, 1)
@@ -210,7 +345,9 @@ def _best_existing_page(gsc_rows: list[models.GoogleSearchMetric], ga4_rows: lis
             "ga4_sessions": 0,
             "ga4_users": 0,
             "_pos_weight": 0,
+            "_match_scores": [],
         })
+        p["_match_scores"].append(getattr(row, "_match_score", MIN_RELEVANT_EVIDENCE_SCORE))
         if not p.get("url"):
             p["url"] = row.page_path
         p["title"] = p.get("title") or row.page_title
@@ -221,8 +358,19 @@ def _best_existing_page(gsc_rows: list[models.GoogleSearchMetric], ga4_rows: lis
     for p in pages.values():
         if p["_pos_weight"]:
             p["gsc_avg_position"] = round(p["gsc_avg_position"] / p["_pos_weight"], 1)
+        scores = p.pop("_match_scores", []) or [0]
+        p["page_match_score"] = round(sum(scores) / len(scores))
+        p["target_page_confidence"] = min(100, round(p["page_match_score"] * 0.7 + _page_leverage_score(p) * 0.3))
         p.pop("_pos_weight", None)
-    return max(pages.values(), key=lambda p: (p["gsc_impressions"] >= 100 and 5 <= (p["gsc_avg_position"] or 99) <= 20, p["ga4_sessions"], p["gsc_impressions"]))
+    best = max(pages.values(), key=lambda p: (
+        p["page_match_score"],
+        p["gsc_impressions"] >= 100 and 5 <= (p["gsc_avg_position"] or 99) <= 20,
+        p["ga4_sessions"],
+        p["gsc_impressions"],
+    ))
+    if best["page_match_score"] < MIN_TARGET_PAGE_SCORE:
+        return None
+    return best
 
 
 def _page_match_key(value: str | None) -> str:
@@ -257,6 +405,29 @@ def _page_leverage_score(best_page: dict | None) -> int:
     if best_page.get("ga4_sessions", 0) >= 100:
         score += 25
     return min(100, score)
+
+
+def _evidence_quality_score(total: int, gsc_rows: list, ga4_rows: list, filtered_count: int) -> int:
+    metric_scores = [getattr(r, "_match_score", MIN_RELEVANT_EVIDENCE_SCORE) for r in (gsc_rows + ga4_rows)]
+    metric_quality = round(sum(metric_scores) / len(metric_scores)) if metric_scores else 0
+    prompt_quality = min(45, 30 + min(total, 8) * 3)
+    evidence_bonus = 0
+    if gsc_rows:
+        evidence_bonus += 10
+    if ga4_rows:
+        evidence_bonus += 10
+    noise_penalty = min(15, round(filtered_count / 25))
+    return max(0, min(100, max(prompt_quality, metric_quality) + evidence_bonus - noise_penalty))
+
+
+def _success_metric(evidence: dict) -> str:
+    prompt_count = evidence.get("run_count", 0)
+    coverage = evidence.get("coverage_rate", 0)
+    owned = evidence.get("owned_citation_rate", 0)
+    return (
+        f"After implementation, rerun {prompt_count} linked prompts; target coverage above "
+        f"{min(100, max(coverage + 15, 65))}% and owned citation above {min(100, max(owned + 15, 50))}%."
+    )
 
 
 def _contains_any(text: str, needles: Iterable[str]) -> bool:
@@ -358,11 +529,15 @@ def _opportunity_type(evidence: dict) -> str:
     prompts_text = " ".join(evidence.get("linked_prompt_texts", []))
     substitute_hits = _substitute_hits(evidence)
     buyer_intent = evidence.get("buyer_intent", "")
+    external_citations = sum(x.get("count", 0) for x in evidence.get("top_external_sources", []))
+    owned_citations = sum(x.get("count", 0) for x in evidence.get("top_owned_sources", []))
 
     if "Substitute Dominated" in modes and (competitor_rate >= 25 or substitute_hits >= 1):
         return "Defend Substitute Positioning"
     if competitor_rate >= 45 or buyer_intent == "comparison":
         return "Add Comparison Section"
+    if owned_rate < 25 and external_citations >= max(2, evidence.get("run_count", 0) // 3) and owned_citations == 0:
+        return "Improve Source Authority"
     if "Weak Proof / Citation Asset" in modes:
         return "Add Citation Proof"
     if has_leverage and "Weak Existing Page" in modes:
@@ -397,6 +572,8 @@ def _opportunity_title(opportunity_type: str, cluster: str, best_page: dict | No
         return f"Create citation proof for {topic}"
     if opportunity_type == "Improve Internal Linking":
         return f"Strengthen links to the {topic} source page"
+    if opportunity_type == "Improve Source Authority":
+        return f"Make OCSiAl/TUBALL citable for {topic}"
     if opportunity_type == "Defend Substitute Positioning":
         substitute = _human_label(theme or "substitute materials")
         return f"Defend TUBALL vs {substitute} for {topic}"
@@ -448,6 +625,18 @@ def build_cluster_evidence(db: Session) -> list[dict]:
 
     for cluster, plist in by_cluster.items():
         terms, specific_terms = _prompt_terms(plist)
+        classifier = classify_opportunity(" ".join(p.prompt_text for p in plist[:12]), cluster)
+        terms |= _norm_words(" ".join([
+            classifier.get("product_area", ""),
+            classifier.get("application", ""),
+            classifier.get("buyer_intent", ""),
+            classifier.get("substitute_theme", ""),
+        ]))
+        specific_terms |= {t for t in _norm_words(" ".join([
+            classifier.get("product_area", ""),
+            classifier.get("application", ""),
+            classifier.get("substitute_theme", ""),
+        ])) if t not in GENERIC_TERMS}
         good = [p for p in plist if p.monitor_status == "Good"]
         risk = [p for p in plist if p.monitor_status == "Risk"]
         gap = [p for p in plist if p.monitor_status == "Gap"]
@@ -468,8 +657,9 @@ def build_cluster_evidence(db: Session) -> list[dict]:
                 else:
                     external_sources[d] += 1
 
-        gsc_rows = [row for row in gsc_all if _matches_terms(row.query + " " + row.page, terms, specific_terms)]
-        ga4_rows = [row for row in ga4_all if _matches_terms((row.page_path or "") + " " + (row.page_title or ""), terms, specific_terms)]
+        gsc_rows, filtered_gsc_count, filtered_gsc = _filter_gsc_rows(gsc_all, terms, specific_terms, classifier)
+        ga4_rows, filtered_ga4_count, filtered_ga4 = _filter_ga4_rows(ga4_all, terms, specific_terms, classifier)
+        filtered_out_count = filtered_gsc_count + filtered_ga4_count
         gsc_impressions = sum(r.impressions or 0 for r in gsc_rows)
         gsc_clicks = sum(r.clicks or 0 for r in gsc_rows)
         pos_weight = sum(max(r.impressions or 0, 1) for r in gsc_rows)
@@ -485,10 +675,9 @@ def build_cluster_evidence(db: Session) -> list[dict]:
         search_score = _search_demand_score(gsc_impressions, gsc_clicks, gsc_avg_position)
         page_score = _page_leverage_score(best_page)
         business_score = min(100, max_priority * 20)
+        evidence_quality = _evidence_quality_score(total, gsc_rows, ga4_rows, filtered_out_count)
         confidence = min(95, 40 + min(total, 10) * 4 + (15 if gsc_rows else 0) + (15 if ga4_rows else 0))
         weights = EvidenceWeights(gap_severity, comp_pressure, search_score, page_score, business_score, confidence)
-
-        classifier = classify_opportunity(" ".join(p.prompt_text for p in plist[:12]), cluster)
         evidence = {
             "cluster": cluster,
             "opportunity_key": classifier["opportunity_key"],
@@ -514,21 +703,28 @@ def build_cluster_evidence(db: Session) -> list[dict]:
             "ga4_sessions": ga4_sessions,
             "ga4_users": ga4_users,
             "top_gsc_queries": [
-                {"metric_id": r.metric_id, "query": r.query, "page": r.page, "impressions": r.impressions, "clicks": r.clicks, "avg_position": r.avg_position}
+                {"metric_id": r.metric_id, "query": r.query, "page": r.page, "impressions": r.impressions, "clicks": r.clicks, "avg_position": r.avg_position, "evidence_quality": getattr(r, "_match_score", 0)}
                 for r in sorted(gsc_rows, key=lambda r: r.impressions or 0, reverse=True)[:8]
             ],
             "top_ga4_pages": [
-                {"metric_id": r.metric_id, "page_path": r.page_path, "page_title": r.page_title, "sessions": r.sessions, "active_users": r.active_users}
+                {"metric_id": r.metric_id, "page_path": r.page_path, "page_title": r.page_title, "sessions": r.sessions, "active_users": r.active_users, "evidence_quality": getattr(r, "_match_score", 0)}
                 for r in sorted(ga4_rows, key=lambda r: r.sessions or 0, reverse=True)[:8]
             ],
             "best_existing_page": best_page,
             "linked_prompt_ids": [p.prompt_id for p in plist],
             "linked_prompt_texts": [p.prompt_text for p in plist[:8]],
+            "prompts_to_rerun": [p.prompt_id for p in plist if p.monitor_status in ("Gap", "Risk")][:12],
+            "evidence_quality": evidence_quality,
+            "page_match_score": best_page.get("page_match_score") if best_page else 0,
+            "target_page_confidence": best_page.get("target_page_confidence") if best_page else 0,
+            "filtered_out_evidence_count": filtered_out_count,
+            "filtered_out_evidence": (filtered_gsc + filtered_ga4)[:10],
             "priority_components": weights.__dict__ | {"priority_score": weights.priority_score},
         }
         evidence["failure_modes"] = _failure_modes(evidence)
         evidence["opportunity_type"] = _opportunity_type(evidence)
         evidence["opportunity_title"] = _opportunity_title(evidence["opportunity_type"], cluster, best_page, evidence)
+        evidence["success_metric"] = _success_metric(evidence)
         out.append(evidence)
 
     return sorted(out, key=lambda e: e["priority_components"]["priority_score"], reverse=True)
@@ -595,8 +791,9 @@ def build_opportunity_evidence(db: Session) -> list[dict]:
                 else:
                     external_sources[d] += 1
 
-        gsc_rows = [row for row in gsc_all if _matches_terms(row.query + " " + row.page, terms, specific_terms)]
-        ga4_rows = [row for row in ga4_all if _matches_terms((row.page_path or "") + " " + (row.page_title or ""), terms, specific_terms)]
+        gsc_rows, filtered_gsc_count, filtered_gsc = _filter_gsc_rows(gsc_all, terms, specific_terms, group)
+        ga4_rows, filtered_ga4_count, filtered_ga4 = _filter_ga4_rows(ga4_all, terms, specific_terms, group)
+        filtered_out_count = filtered_gsc_count + filtered_ga4_count
         gsc_impressions = sum(r.impressions or 0 for r in gsc_rows)
         gsc_clicks = sum(r.clicks or 0 for r in gsc_rows)
         pos_weight = sum(max(r.impressions or 0, 1) for r in gsc_rows)
@@ -612,6 +809,7 @@ def build_opportunity_evidence(db: Session) -> list[dict]:
         search_score = _search_demand_score(gsc_impressions, gsc_clicks, gsc_avg_position)
         page_score = _page_leverage_score(best_page)
         business_score = min(100, max_priority * 20)
+        evidence_quality = _evidence_quality_score(total, gsc_rows, ga4_rows, filtered_out_count)
         confidence = min(95, 45 + min(total, 8) * 5 + (15 if gsc_rows else 0) + (15 if ga4_rows else 0))
         weights = EvidenceWeights(gap_severity, comp_pressure, search_score, page_score, business_score, confidence)
 
@@ -642,21 +840,28 @@ def build_opportunity_evidence(db: Session) -> list[dict]:
             "ga4_sessions": ga4_sessions,
             "ga4_users": ga4_users,
             "top_gsc_queries": [
-                {"metric_id": r.metric_id, "query": r.query, "page": r.page, "impressions": r.impressions, "clicks": r.clicks, "avg_position": r.avg_position}
+                {"metric_id": r.metric_id, "query": r.query, "page": r.page, "impressions": r.impressions, "clicks": r.clicks, "avg_position": r.avg_position, "evidence_quality": getattr(r, "_match_score", 0)}
                 for r in sorted(gsc_rows, key=lambda r: r.impressions or 0, reverse=True)[:10]
             ],
             "top_ga4_pages": [
-                {"metric_id": r.metric_id, "page_path": r.page_path, "page_title": r.page_title, "sessions": r.sessions, "active_users": r.active_users}
+                {"metric_id": r.metric_id, "page_path": r.page_path, "page_title": r.page_title, "sessions": r.sessions, "active_users": r.active_users, "evidence_quality": getattr(r, "_match_score", 0)}
                 for r in sorted(ga4_rows, key=lambda r: r.sessions or 0, reverse=True)[:10]
             ],
             "best_existing_page": best_page,
             "linked_prompt_ids": [p.prompt_id for p in plist],
             "linked_prompt_texts": [p.prompt_text for p in plist],
+            "prompts_to_rerun": [p.prompt_id for p in plist if p.monitor_status in ("Gap", "Risk")][:12],
+            "evidence_quality": evidence_quality,
+            "page_match_score": best_page.get("page_match_score") if best_page else 0,
+            "target_page_confidence": best_page.get("target_page_confidence") if best_page else 0,
+            "filtered_out_evidence_count": filtered_out_count,
+            "filtered_out_evidence": (filtered_gsc + filtered_ga4)[:10],
             "priority_components": weights.__dict__ | {"priority_score": weights.priority_score},
         }
         evidence["failure_modes"] = _failure_modes(evidence)
         evidence["opportunity_type"] = _opportunity_type(evidence)
         evidence["opportunity_title"] = _opportunity_title(evidence["opportunity_type"], label, best_page, evidence)
+        evidence["success_metric"] = _success_metric(evidence)
         out.append(evidence)
 
     return sorted(out, key=lambda e: e["priority_components"]["priority_score"], reverse=True)

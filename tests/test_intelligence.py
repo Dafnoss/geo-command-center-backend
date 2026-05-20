@@ -14,6 +14,7 @@ from app import intelligence  # noqa: E402
 from app import models  # noqa: E402
 from app import prompt_research  # noqa: E402
 from app import source_utils  # noqa: E402
+from app.routers import integrations  # noqa: E402
 from app.traffic import classify_ai_source  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
@@ -667,6 +668,7 @@ class IntelligenceTests(unittest.TestCase):
             "Add FAQ / Buyer Questions",
             "Add Citation Proof",
             "Upgrade Existing Page",
+            "Improve Source Authority",
         })
 
         summary = self.client.get("/recommendations/summary")
@@ -742,6 +744,76 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(rec["type"], "Upgrade Existing Page")
         self.assertTrue(rec["score_breakdown"]["target_pages"])
         self.assertIn("Weak Existing Page", rec["score_breakdown"]["failure_modes"])
+        self.assertGreaterEqual(rec["score_breakdown"]["target_page_confidence"], 60)
+
+    def test_noisy_gsc_query_does_not_select_target_page(self):
+        suffix = uuid.uuid4().hex[:8]
+        cluster = f"Noisy Evidence {suffix}"
+        prompt_id = f"PNOISE-{suffix}"
+        self.client.post("/prompts", json={
+            "prompt_id": prompt_id,
+            "prompt_text": "carbon black vs CNT additive for conductive coatings",
+            "topic_cluster": cluster,
+            "business_priority": 5,
+        })
+        self.client.post("/ai-results", json={
+            "prompt_id": prompt_id,
+            "answer_text": "Cabot carbon black is often mentioned; OCSiAl and TUBALL are not included.",
+            "competitors_mentioned": ["Cabot"],
+            "answer_quality_score": 3,
+        })
+        noise_id = f"GSC-NOISE-{suffix}"
+        db = SessionLocal()
+        try:
+            db.add(models.GoogleSearchMetric(
+                metric_id=noise_id,
+                site_url="https://tuball.com/",
+                date_start=date.today(),
+                date_end=date.today(),
+                query="what is carbon black used for",
+                page="https://tuball.com/articles/carbon-black-uses",
+                clicks=900,
+                impressions=90000,
+                avg_position=6.0,
+            ))
+            db.commit()
+        finally:
+            db.close()
+        opportunities = self.client.get("/evidence/opportunities").json()
+        item = next(r for r in opportunities if cluster in (r.get("source_clusters") or []))
+        self.assertNotIn(noise_id, [r["metric_id"] for r in item["top_gsc_queries"]])
+        self.assertFalse(item["best_existing_page"])
+        self.assertGreaterEqual(item["filtered_out_evidence_count"], 1)
+
+    def test_legacy_recommendation_without_structured_evidence_becomes_stale(self):
+        suffix = uuid.uuid4().hex[:8]
+        rec_id = f"R-LEGACY-{suffix}"
+        db = SessionLocal()
+        try:
+            db.add(models.Recommendation(
+                recommendation_id=rec_id,
+                title="Legacy prompt-level recommendation",
+                type="Create new page",
+                diagnosis="Old shape",
+                evidence=[],
+                recommended_actions=[],
+                acceptance_criteria=[],
+                priority_score=60,
+                confidence_score=50,
+                status="New",
+                score_breakdown={"source": "openai", "scope": "prompt"},
+            ))
+            db.commit()
+        finally:
+            db.close()
+        res = self.client.post("/recommendations/process-prompts")
+        self.assertEqual(res.status_code, 200, res.text)
+        db = SessionLocal()
+        try:
+            row = db.query(models.Recommendation).filter_by(recommendation_id=rec_id).one()
+            self.assertEqual(row.status, "Stale")
+        finally:
+            db.close()
 
     def test_evidence_clusters_endpoint_returns_canonical_model(self):
         suffix = uuid.uuid4().hex[:8]
@@ -766,6 +838,42 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(row["risk_count"], 1)
         self.assertEqual(row["competitor_pressure_rate"], 100)
         self.assertIn("opportunity_type", row)
+        self.assertIn("evidence_quality", row)
+
+    def test_evidence_opportunities_endpoint_returns_filtered_model(self):
+        res = self.client.get("/evidence/opportunities")
+        self.assertEqual(res.status_code, 200, res.text)
+        rows = res.json()
+        self.assertIsInstance(rows, list)
+        if rows:
+            self.assertIn("evidence_quality", rows[0])
+            self.assertIn("prompts_to_rerun", rows[0])
+
+    def test_google_status_returns_json_when_refresh_fails(self):
+        suffix = uuid.uuid4().hex[:8]
+        db = SessionLocal()
+        try:
+            db.add(models.ConnectorAccount(
+                connector_id=f"GOOG-{suffix}",
+                provider="google",
+                account_label=f"broken-{suffix}@example.com",
+                scopes=[],
+                token_json={"broken": True},
+                status="connected",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        original = integrations._credentials_for_account
+        try:
+            integrations._credentials_for_account = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("refresh failed"))
+            res = self.client.get("/integrations/google/status")
+        finally:
+            integrations._credentials_for_account = original
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIn(body["status"], {"reconnect_required", "connected"})
+        self.assertIn("errors", body)
 
     def test_recommendation_done_stores_lifecycle_metadata(self):
         suffix = uuid.uuid4().hex[:8]

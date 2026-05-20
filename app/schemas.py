@@ -178,6 +178,8 @@ class GoogleConnectorStatus(BaseModel):
     ga4_properties: List[dict] = []
     search_rows: int = 0
     analytics_rows: int = 0
+    warnings: List[str] = []
+    errors: List[str] = []
 
 
 class GoogleAuthUrlOut(BaseModel):
@@ -346,6 +348,13 @@ class ClusterEvidenceOut(BaseModel):
     best_existing_page: Optional[dict] = None
     linked_prompt_ids: List[str] = []
     linked_prompt_texts: List[str] = []
+    prompts_to_rerun: List[str] = []
+    evidence_quality: int = 0
+    page_match_score: int = 0
+    target_page_confidence: int = 0
+    filtered_out_evidence_count: int = 0
+    filtered_out_evidence: List[dict] = []
+    success_metric: str = ""
     priority_components: dict
     opportunity_type: str
     opportunity_title: str

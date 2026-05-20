@@ -367,26 +367,45 @@ def google_status(db: Session = Depends(get_db)):
     accounts = _accounts(db)
     last_sync = max((a.last_sync_at for a in accounts if a.last_sync_at), default=None)
     ga4_props: list[dict] = []
+    errors: list[str] = []
+    warnings: list[str] = []
     for account in accounts:
         try:
             creds = _credentials_for_account(db, account)
             for prop in _list_ga4_properties(creds):
                 prop["account_email"] = account.account_label
                 ga4_props.append(prop)
-        except HTTPException:
-            continue
+        except HTTPException as exc:
+            errors.append(f"{account.account_label}: {exc.detail}")
+        except Exception as exc:
+            errors.append(f"{account.account_label}: {type(exc).__name__}: {str(exc)[:160]}")
+    search_rows = db.query(models.GoogleSearchMetric).count()
+    analytics_rows = db.query(models.GoogleAnalyticsMetric).count()
+    if errors and (search_rows or analytics_rows):
+        warnings.append("Google connector needs attention, but previously synced GSC/GA4 data is still available.")
+    if not accounts and (search_rows or analytics_rows):
+        warnings.append("No active Google account is connected, but historical GSC/GA4 rows are present.")
+    status = "disconnected"
+    if accounts and errors:
+        status = "reconnect_required"
+    elif accounts:
+        status = "connected"
+    elif search_rows or analytics_rows:
+        status = "historical_data"
     return schemas.GoogleConnectorStatus(
         configured=_configured(),
         connected=bool(accounts),
-        status="connected" if accounts else "disconnected",
+        status=status,
         account_label=", ".join(a.account_label for a in accounts),
         scopes=SCOPES if accounts else [],
         last_sync_at=last_sync,
         search_console_sites=split_csv(_setting(db, "google_search_console_sites", "")),
         ga4_property_id=_setting(db, "google_ga4_property_id", ""),
         ga4_properties=ga4_props,
-        search_rows=db.query(models.GoogleSearchMetric).count(),
-        analytics_rows=db.query(models.GoogleAnalyticsMetric).count(),
+        search_rows=search_rows,
+        analytics_rows=analytics_rows,
+        warnings=warnings,
+        errors=errors,
     )
 
 

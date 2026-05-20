@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import schemas
 from app.database import get_db
-from app.evidence import build_cluster_evidence, get_cluster_evidence
+from app.evidence import build_cluster_evidence, build_opportunity_evidence, get_cluster_evidence
 
 
 router = APIRouter(prefix="/evidence", tags=["evidence"])
@@ -18,6 +18,11 @@ router = APIRouter(prefix="/evidence", tags=["evidence"])
 @router.get("/clusters", response_model=list[schemas.ClusterEvidenceOut])
 def clusters(db: Session = Depends(get_db)):
     return build_cluster_evidence(db)
+
+
+@router.get("/opportunities", response_model=list[dict])
+def opportunities(db: Session = Depends(get_db)):
+    return build_opportunity_evidence(db)
 
 
 @router.get("/clusters/{cluster}", response_model=schemas.ClusterEvidenceOut)

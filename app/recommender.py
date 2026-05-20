@@ -330,15 +330,17 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
     weak_evidence = [
         e for e in all_evidence
         if (e["gap_count"] + e["risk_count"]) > 0
+        and e.get("failure_modes")
+        and e.get("evidence_quality", 0) >= 40
     ]
-    selected_evidence = _select_strategic_opportunities(weak_evidence, limit=8)
+    selected_evidence = _select_strategic_opportunities(weak_evidence, limit=7)
 
     active_keys = {e["recommendation_key"] for e in selected_evidence}
     rejected_stale = 0
     seen_active_keys: set[str] = set()
     for rec in db.query(models.Recommendation).filter(models.Recommendation.status.in_(("New", "Accepted", "In Progress"))).all():
         meta = rec.score_breakdown or {}
-        if meta.get("source") != "cluster_evidence":
+        if _is_untrusted_active_recommendation(meta):
             rec.status = "Stale"
             rejected_stale += 1
             continue
@@ -430,7 +432,23 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
     }
 
 
-def _select_strategic_opportunities(items: list[dict], limit: int = 10) -> list[dict]:
+def _is_untrusted_active_recommendation(meta: dict) -> bool:
+    if meta.get("source") != "cluster_evidence":
+        return True
+    if meta.get("scope") not in ("opportunity", "cluster"):
+        return True
+    if not meta.get("linked_prompt_ids"):
+        return True
+    if not meta.get("failure_modes"):
+        return True
+    if meta.get("evidence_quality") is None:
+        return True
+    if not meta.get("recommendation_key") and not (meta.get("opportunity_type") and meta.get("cluster")):
+        return True
+    return False
+
+
+def _select_strategic_opportunities(items: list[dict], limit: int = 7) -> list[dict]:
     """Collapse duplicate actions into fewer, higher-quality opportunities."""
     grouped: dict[str, dict] = {}
     for item in items:
@@ -449,6 +467,7 @@ def _select_strategic_opportunities(items: list[dict], limit: int = 10) -> list[
         item for item in ranked
         if item["priority_components"]["priority_score"] >= 55
         and (item["gap_count"] + item["risk_count"]) > 0
+        and item.get("evidence_quality", 0) >= 40
     ]
     candidates = high_quality or ranked[:3]
     selected: list[dict] = []
@@ -465,9 +484,7 @@ def _select_strategic_opportunities(items: list[dict], limit: int = 10) -> list[
 
 
 def _max_active_per_type(typ: str) -> int:
-    if typ in ("Defend Substitute Positioning", "Add Comparison Section", "Upgrade Existing Page"):
-        return 2
-    return 3
+    return 2
 
 
 def _opportunity_key(item: dict) -> str:
@@ -540,6 +557,14 @@ def _merge_opportunity(base: dict, item: dict) -> None:
     base["top_gsc_queries"] = _merge_metric_rows(base["top_gsc_queries"], item["top_gsc_queries"], "metric_id", "impressions")
     base["top_ga4_pages"] = _merge_metric_rows(base["top_ga4_pages"], item["top_ga4_pages"], "metric_id", "sessions")
     base["failure_modes"] = _unique((base.get("failure_modes") or []) + (item.get("failure_modes") or []))
+    base["prompts_to_rerun"] = _unique((base.get("prompts_to_rerun") or []) + (item.get("prompts_to_rerun") or []))[:12]
+    base["filtered_out_evidence_count"] = (base.get("filtered_out_evidence_count") or 0) + (item.get("filtered_out_evidence_count") or 0)
+    base["filtered_out_evidence"] = ((base.get("filtered_out_evidence") or []) + (item.get("filtered_out_evidence") or []))[:10]
+    base["evidence_quality"] = round((base.get("evidence_quality", 0) + item.get("evidence_quality", 0)) / 2)
+    if not base.get("best_existing_page") and item.get("best_existing_page"):
+        base["best_existing_page"] = item["best_existing_page"]
+        base["page_match_score"] = item.get("page_match_score", 0)
+        base["target_page_confidence"] = item.get("target_page_confidence", 0)
     base["gsc_impressions"] = sum(r.get("impressions") or 0 for r in base["top_gsc_queries"])
     base["gsc_clicks"] = sum(r.get("clicks") or 0 for r in base["top_gsc_queries"])
     pos_weight = sum(max(r.get("impressions") or 0, 1) for r in base["top_gsc_queries"])
@@ -547,6 +572,7 @@ def _merge_opportunity(base: dict, item: dict) -> None:
     base["ga4_sessions"] = sum(r.get("sessions") or 0 for r in base["top_ga4_pages"])
     base["ga4_users"] = sum(r.get("active_users") or 0 for r in base["top_ga4_pages"])
     base["opportunity_title"] = _merged_title(base)
+    base["success_metric"] = _merged_success_metric(base)
     _refresh_priority(base)
 
 
@@ -592,6 +618,14 @@ def _merged_title(item: dict) -> str:
     return item.get("opportunity_title") or f"Improve {item['cluster']} AI visibility"
 
 
+def _merged_success_metric(item: dict) -> str:
+    return (
+        f"Rerun {len(item.get('prompts_to_rerun') or item.get('linked_prompt_ids') or [])} linked prompts; "
+        f"target coverage above {min(100, max(item.get('coverage_rate', 0) + 15, 65))}% and owned citation above "
+        f"{min(100, max(item.get('owned_citation_rate', 0) + 15, 50))}%."
+    )
+
+
 def _cluster_group_label(clusters: list[str], noun: str = "clusters") -> str:
     if len(clusters) == 1:
         return clusters[0]
@@ -630,6 +664,7 @@ def _strategic_evidence(item: dict) -> list[str]:
         f"{item['gap_count'] + item['risk_count']} of {item['run_count']} run prompts are Gap/Risk.",
         f"AI coverage is {item['coverage_rate']}%; brand mention is {item['brand_mention_rate']}%; owned citation is {item['owned_citation_rate']}%.",
         f"Competitor pressure is {item['competitor_pressure_rate']}%.",
+        f"Evidence quality is {item.get('evidence_quality', 0)}/100; {item.get('filtered_out_evidence_count', 0)} noisy Google rows were ignored.",
     ]
     if item.get("failure_modes"):
         evidence.append("Failure modes: " + ", ".join(item["failure_modes"][:5]) + ".")
@@ -649,7 +684,9 @@ def _strategic_evidence(item: dict) -> list[str]:
         evidence.append(f"GA4 leverage: {item['ga4_sessions']:,} sessions on matching pages.")
     if item.get("best_existing_page"):
         page = item["best_existing_page"]
-        evidence.append(f"Best page candidate: {page.get('title') or page.get('url')} ({page.get('ga4_sessions', 0):,} sessions, {page.get('gsc_impressions', 0):,} impressions).")
+        evidence.append(f"Best page candidate: {page.get('title') or page.get('url')} ({page.get('ga4_sessions', 0):,} sessions, {page.get('gsc_impressions', 0):,} impressions, match {page.get('target_page_confidence', 0)}/100).")
+    else:
+        evidence.append("No reliable target page was detected after filtering noisy GSC/GA4 evidence.")
     return evidence
 
 
@@ -675,6 +712,8 @@ def _strategic_actions(item: dict) -> list[str]:
         actions.append(f"Upgrade the existing page candidate: {target}.")
     elif typ == "Create Source Page":
         actions.append(f"Create one authoritative OCSiAl/TUBALL source page for {cluster}.")
+    elif typ == "Improve Source Authority":
+        actions.append(f"Create or improve a citation-grade OCSiAl/TUBALL asset for {cluster}; current AI answers rely on external sources instead of owned sources.")
     elif target:
         actions.append(f"Use {target} as the primary implementation surface unless a better page exists.")
     else:
@@ -700,6 +739,9 @@ def _strategic_actions(item: dict) -> list[str]:
         actions.append("Add FAQ/H2 blocks matching buyer questions" + (": " + "; ".join(qs) if qs else "."))
     if typ in ("Add Citation Proof", "Create Source Page") or item["owned_citation_rate"] < 35:
         actions.append("Add citation-friendly proof: dosage ranges, use cases, material compatibility, claims, and source-style references.")
+    if typ == "Improve Source Authority":
+        actions.append("Publish source-style facts that AI can quote: concise definitions, selection criteria, compatibility tables, quantified TUBALL advantages, and links to technical references.")
+        actions.append("Make the page discoverable from existing product/application pages and use stable headings that mirror the linked prompts.")
     if item["top_external_sources"] and item["owned_citation_rate"] < 50:
         domains = ", ".join(x["domain"] for x in item["top_external_sources"][:3])
         actions.append(f"Use the cited-source pattern from {domains} to decide what evidence format AI currently trusts.")
@@ -716,12 +758,12 @@ def _strategic_acceptance(item: dict) -> list[str]:
         f"Asset or page section directly answers at least {min(5, max(1, item['run_count']))} linked monitored prompts.",
         "Includes OCSiAl, TUBALL, owned-domain references, and source/citation language.",
         "Includes comparison or substitute positioning when competitor pressure is above 30%.",
-        "After rerun, linked cluster coverage improves or at least one Gap/Risk prompt becomes Good.",
+        item.get("success_metric") or "After rerun, linked cluster coverage improves or at least one Gap/Risk prompt becomes Good.",
     ]
 
 
 def _strategic_impact(item: dict) -> str:
-    return (
+    return item.get("success_metric") or (
         f"Improve coverage across {item['run_count']} linked monitored prompts "
         f"and increase owned-source citation from {item['owned_citation_rate']}%."
     )
@@ -760,6 +802,13 @@ def _recommendation_meta(item: dict) -> dict:
         "existing_page_leverage": components["existing_page_leverage"],
         "business_priority": components["business_priority"],
         "confidence": components["confidence"],
+        "evidence_quality": item.get("evidence_quality", 0),
+        "page_match_score": item.get("page_match_score", 0),
+        "target_page_confidence": item.get("target_page_confidence", 0),
+        "filtered_out_evidence_count": item.get("filtered_out_evidence_count", 0),
+        "filtered_out_evidence": item.get("filtered_out_evidence", []),
+        "success_metric": item.get("success_metric", ""),
+        "prompts_to_rerun": item.get("prompts_to_rerun", []),
         "target_pages": [item["best_existing_page"]] if item.get("best_existing_page") else [],
         "linked_prompt_ids": item["linked_prompt_ids"],
         "linked_prompt_texts": item.get("linked_prompt_texts", []),
