@@ -360,7 +360,7 @@ def _best_existing_page(gsc_rows: list[models.GoogleSearchMetric], ga4_rows: lis
             p["gsc_avg_position"] = round(p["gsc_avg_position"] / p["_pos_weight"], 1)
         scores = p.pop("_match_scores", []) or [0]
         p["page_match_score"] = round(sum(scores) / len(scores))
-        p["target_page_confidence"] = min(100, round(p["page_match_score"] * 0.7 + _page_leverage_score(p) * 0.3))
+        p["target_page_confidence"] = min(100, round(p["page_match_score"] * 0.85 + _page_leverage_score(p) * 0.15))
         p.pop("_pos_weight", None)
     best = max(pages.values(), key=lambda p: (
         p["page_match_score"],
