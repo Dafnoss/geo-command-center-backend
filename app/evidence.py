@@ -187,7 +187,7 @@ def _query_noise_reason(query: str, classifier: dict) -> str:
             return "generic_or_navigation_query"
     intent = (classifier.get("buyer_intent") or "").lower()
     application = (classifier.get("application") or "").lower()
-    if "standard" in q and intent != "safety/regulatory":
+    if any(term in q for term in ("standard", "standards", "astm", "iso ", "iec ", "ansi ")) and intent != "safety/regulatory":
         return "standards_query_outside_regulatory_context"
     for term in UNRELATED_QUERY_TERMS:
         if term in q:

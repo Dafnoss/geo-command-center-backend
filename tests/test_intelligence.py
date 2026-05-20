@@ -763,6 +763,7 @@ class IntelligenceTests(unittest.TestCase):
             "answer_quality_score": 3,
         })
         noise_id = f"GSC-NOISE-{suffix}"
+        standard_id = f"GSC-STANDARD-{suffix}"
         db = SessionLocal()
         try:
             db.add(models.GoogleSearchMetric(
@@ -776,12 +777,25 @@ class IntelligenceTests(unittest.TestCase):
                 impressions=90000,
                 avg_position=6.0,
             ))
+            db.add(models.GoogleSearchMetric(
+                metric_id=standard_id,
+                site_url="https://tuball.com/",
+                date_start=date.today(),
+                date_end=date.today(),
+                query="astm d257",
+                page="https://tuball.com/articles/esd-standards",
+                clicks=700,
+                impressions=70000,
+                avg_position=5.0,
+            ))
             db.commit()
         finally:
             db.close()
         opportunities = self.client.get("/evidence/opportunities").json()
         item = next(r for r in opportunities if cluster in (r.get("source_clusters") or []))
-        self.assertNotIn(noise_id, [r["metric_id"] for r in item["top_gsc_queries"]])
+        linked_metric_ids = [r["metric_id"] for r in item["top_gsc_queries"]]
+        self.assertNotIn(noise_id, linked_metric_ids)
+        self.assertNotIn(standard_id, linked_metric_ids)
         self.assertFalse(item["best_existing_page"])
         self.assertGreaterEqual(item["filtered_out_evidence_count"], 1)
 
