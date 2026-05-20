@@ -764,6 +764,7 @@ class IntelligenceTests(unittest.TestCase):
         })
         noise_id = f"GSC-NOISE-{suffix}"
         standard_id = f"GSC-STANDARD-{suffix}"
+        ansi_id = f"GSC-ANSI-{suffix}"
         db = SessionLocal()
         try:
             db.add(models.GoogleSearchMetric(
@@ -788,6 +789,17 @@ class IntelligenceTests(unittest.TestCase):
                 impressions=70000,
                 avg_position=5.0,
             ))
+            db.add(models.GoogleSearchMetric(
+                metric_id=ansi_id,
+                site_url="https://tuball.com/",
+                date_start=date.today(),
+                date_end=date.today(),
+                query="ansi/esd s20.20",
+                page="https://tuball.com/articles/esd-standards",
+                clicks=600,
+                impressions=60000,
+                avg_position=5.0,
+            ))
             db.commit()
         finally:
             db.close()
@@ -796,6 +808,7 @@ class IntelligenceTests(unittest.TestCase):
         linked_metric_ids = [r["metric_id"] for r in item["top_gsc_queries"]]
         self.assertNotIn(noise_id, linked_metric_ids)
         self.assertNotIn(standard_id, linked_metric_ids)
+        self.assertNotIn(ansi_id, linked_metric_ids)
         self.assertFalse(item["best_existing_page"])
         self.assertGreaterEqual(item["filtered_out_evidence_count"], 1)
 
