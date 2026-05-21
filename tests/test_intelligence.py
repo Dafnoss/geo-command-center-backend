@@ -221,6 +221,29 @@ class IntelligenceTests(unittest.TestCase):
         self.assertTrue(any("conductive silicone rubber" in p for p in prompts))
         self.assertTrue(any("single-walled carbon nanotube" in p and "supply" in p for p in prompts))
 
+    def test_prompt_create_persists_canonical_taxonomy(self):
+        suffix = uuid.uuid4().hex[:8]
+        res = self.client.post("/prompts", json={
+            "prompt_id": f"PTAX-{suffix}",
+            "prompt_text": "Which suppliers offer single-walled carbon nanotube additives for conductive coatings?",
+            "topic_cluster": f"Legacy Supplier {suffix}",
+        })
+        self.assertEqual(res.status_code, 201, res.text)
+        body = res.json()
+        self.assertEqual(body["buyer_intent"], "supplier/vendor")
+        self.assertEqual(body["application"], "coatings and paints")
+        self.assertTrue(body["taxonomy_label"])
+        self.assertTrue(body["taxonomy_version"])
+
+    def test_prompt_portfolio_endpoint_returns_quality_diagnostics(self):
+        res = self.client.get("/prompt-research/portfolio")
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertIn("summary", body)
+        self.assertIn("missing_opportunities", body)
+        self.assertIn("duplicate_intent_groups", body)
+        self.assertIn("cleanup_candidates", body)
+
     def test_prompt_research_existing_equivalent_prevents_missing_add(self):
         p = models.Prompt(
             prompt_id="PEQ",
@@ -860,7 +883,7 @@ class IntelligenceTests(unittest.TestCase):
         })
         res = self.client.get("/evidence/clusters")
         self.assertEqual(res.status_code, 200, res.text)
-        row = next((r for r in res.json() if r["cluster"] == cluster), None)
+        row = next((r for r in res.json() if cluster in (r.get("source_clusters") or [])), None)
         self.assertIsNotNone(row)
         self.assertEqual(row["risk_count"], 1)
         self.assertEqual(row["competitor_pressure_rate"], 100)
@@ -913,7 +936,7 @@ class IntelligenceTests(unittest.TestCase):
         })
         self.client.post("/ai-results", json={
             "prompt_id": prompt_id,
-            "answer_text": "Cabot carbon black is commonly recommended; OCSiAl and TUBALL are not mentioned.",
+            "answer_text": "Cabot carbon black is commonly recommended; the target brand is absent.",
             "competitors_mentioned": ["Cabot"],
             "answer_quality_score": 3,
         })

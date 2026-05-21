@@ -50,6 +50,13 @@ class Prompt(Base):
     answer_quality_score: Mapped[int] = mapped_column(Integer, default=0)
     monitor_status: Mapped[str] = mapped_column(String, default="Unchecked")  # Good/Gap/Risk/Needs review/Unchecked
     related_url_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    product_area: Mapped[str] = mapped_column(String, default="")
+    application: Mapped[str] = mapped_column(String, default="")
+    buyer_intent: Mapped[str] = mapped_column(String, default="")
+    substitute_theme: Mapped[str] = mapped_column(String, default="")
+    taxonomy_label: Mapped[str] = mapped_column(String, default="")
+    taxonomy_confidence: Mapped[int] = mapped_column(Integer, default=0)
+    taxonomy_version: Mapped[str] = mapped_column(String, default="")
 
     ai_results: Mapped[list["AiResult"]] = relationship(back_populates="prompt", cascade="all, delete-orphan")
 

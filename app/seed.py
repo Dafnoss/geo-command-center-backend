@@ -8,6 +8,7 @@ by the user (queries) and auto-extracted from monitor runs (sources).
 from __future__ import annotations
 
 import os
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from app.database import Base, engine, SessionLocal
@@ -35,6 +36,7 @@ def init_db():
         os.makedirs("data", exist_ok=True)
 
     Base.metadata.create_all(bind=engine)
+    _migrate_prompt_taxonomy_columns()
 
     db = SessionLocal()
     try:
@@ -43,9 +45,32 @@ def init_db():
         for row in SETTINGS:
             if row["setting_key"] not in existing:
                 db.add(models.Setting(**row))
+        from app.taxonomy import apply_prompt_taxonomy
+        for prompt in db.query(models.Prompt).all():
+            apply_prompt_taxonomy(prompt)
         db.commit()
     finally:
         db.close()
+
+
+def _migrate_prompt_taxonomy_columns() -> None:
+    """Add additive prompt taxonomy columns on existing SQLite/Postgres DBs."""
+    existing = {c["name"] for c in inspect(engine).get_columns("prompts")}
+    ddl = {
+        "product_area": "VARCHAR DEFAULT '' NOT NULL",
+        "application": "VARCHAR DEFAULT '' NOT NULL",
+        "buyer_intent": "VARCHAR DEFAULT '' NOT NULL",
+        "substitute_theme": "VARCHAR DEFAULT '' NOT NULL",
+        "taxonomy_label": "VARCHAR DEFAULT '' NOT NULL",
+        "taxonomy_confidence": "INTEGER DEFAULT 0 NOT NULL",
+        "taxonomy_version": "VARCHAR DEFAULT '' NOT NULL",
+    }
+    missing = [(name, spec) for name, spec in ddl.items() if name not in existing]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for name, spec in missing:
+            conn.execute(text(f"ALTER TABLE prompts ADD COLUMN {name} {spec}"))
 
 
 if __name__ == "__main__":

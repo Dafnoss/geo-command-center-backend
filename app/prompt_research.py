@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app import monitor as monitor_engine
 from app.intelligence import normalize_query
+from app.taxonomy import apply_prompt_taxonomy, prompt_taxonomy
 
 
 STOPWORDS = {
@@ -188,6 +189,7 @@ def apply_research(db: Session, batch_id: str, item_ids: list[str]) -> schemas.P
                 priority=_priority_label(item.priority_score),
                 monitor_status="Unchecked",
             )
+            apply_prompt_taxonomy(prompt)
             db.add(prompt)
             db.flush()
             added.append(prompt)
@@ -305,6 +307,91 @@ def build_coverage_map(db: Session, gsc_rows, ga4_rows, prompts, trend_rows) -> 
         }
         out.append(coverage)
     return sorted(out, key=lambda r: r["priority_score"], reverse=True)
+
+
+def portfolio_report(db: Session) -> dict:
+    gsc_rows = sorted(db.query(models.GoogleSearchMetric).all(), key=lambda r: r.impressions or 0, reverse=True)[:350]
+    ga4_rows = sorted(db.query(models.GoogleAnalyticsMetric).all(), key=lambda r: r.sessions or 0, reverse=True)[:350]
+    prompts = db.query(models.Prompt).all()
+    trends, trend_error = _ensure_trends(db)
+    coverage = build_coverage_map(db, gsc_rows, ga4_rows, prompts, trends)
+    duplicate_groups = _duplicate_intent_groups(prompts)
+    cleanup_rows = _delete_candidates(gsc_rows, ga4_rows, trends, prompts)
+    weak = [
+        _portfolio_topic(row)
+        for row in coverage
+        if row["monitor_status"] in ("weak", "duplicate")
+    ][:12]
+    missing = [
+        _portfolio_topic(row)
+        for row in coverage
+        if row["monitor_status"] == "missing"
+    ][:12]
+    monitored = [
+        _portfolio_topic(row)
+        for row in coverage
+        if row["monitor_status"] == "monitored"
+    ][:12]
+    low_value = [
+        {
+            "prompt_id": row.get("prompt_id"),
+            "prompt_text": row["query_text"],
+            "reason": row["reason"],
+            "status": row["evidence"].get("coverage", {}).get("monitor_status", ""),
+        }
+        for row in cleanup_rows
+        if row["evidence"].get("coverage", {}).get("monitor_status") != "duplicate-intent"
+    ][:12]
+    return {
+        "summary": {
+            "prompt_count": len(prompts),
+            "taxonomy_version": next((prompt.taxonomy_version for prompt in prompts if prompt.taxonomy_version), ""),
+            "missing_count": sum(1 for row in coverage if row["monitor_status"] == "missing"),
+            "weak_count": sum(1 for row in coverage if row["monitor_status"] in ("weak", "duplicate")),
+            "duplicate_group_count": len(duplicate_groups),
+            "cleanup_candidate_count": len(cleanup_rows),
+            "trends_status": "unavailable" if trend_error else "ok",
+        },
+        "monitored_coverage": monitored,
+        "missing_opportunities": missing,
+        "weak_coverage": weak,
+        "duplicate_intent_groups": duplicate_groups[:12],
+        "cleanup_candidates": low_value,
+    }
+
+
+def _portfolio_topic(row: dict) -> dict:
+    return {
+        "coverage_topic": row["coverage_topic"],
+        "product_area": row["product_area"],
+        "application": row["application"],
+        "buyer_intent": row["buyer_intent"],
+        "representative_prompt": row["representative_prompt"],
+        "monitor_status": row["monitor_status"],
+        "priority_score": row["priority_score"],
+        "confidence_score": row["confidence_score"],
+        "matched_prompt_count": len(row.get("matched_existing_prompts") or []),
+    }
+
+
+def _duplicate_intent_groups(prompts: list[models.Prompt]) -> list[dict]:
+    grouped: dict[str, list[models.Prompt]] = {}
+    for prompt in prompts:
+        taxonomy = prompt_taxonomy(prompt)
+        grouped.setdefault(taxonomy["opportunity_key"], []).append(prompt)
+    rows = []
+    for key, group in grouped.items():
+        if len(group) <= MAX_PROMPTS_PER_INTENT_GROUP:
+            continue
+        taxonomy = prompt_taxonomy(group[0])
+        rows.append({
+            "opportunity_key": key,
+            "label": taxonomy["display_label"],
+            "count": len(group),
+            "prompt_ids": [p.prompt_id for p in group[:10]],
+            "sample_prompts": [p.prompt_text for p in group[:5]],
+        })
+    return sorted(rows, key=lambda row: row["count"], reverse=True)
 
 
 def _add_candidates_from_coverage(coverage: list[dict]) -> list[dict]:

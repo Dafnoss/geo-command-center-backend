@@ -20,6 +20,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app import models, schemas
+from app.taxonomy import apply_prompt_taxonomy
 from app.config import settings as app_settings
 
 
@@ -563,6 +564,7 @@ def approve_drafts(db: Session, batch_id: str, draft_ids: list[str]) -> schemas.
             monitor_status="Unchecked",
             status="active",
         )
+        apply_prompt_taxonomy(prompt)
         db.add(prompt)
         db.flush()
         d.status = "imported"

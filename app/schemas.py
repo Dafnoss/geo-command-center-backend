@@ -38,6 +38,13 @@ class PromptOut(ORMModel):
     answer_quality_score: int
     monitor_status: str
     related_url_id: Optional[str]
+    product_area: str = ""
+    application: str = ""
+    buyer_intent: str = ""
+    substitute_theme: str = ""
+    taxonomy_label: str = ""
+    taxonomy_confidence: int = 0
+    taxonomy_version: str = ""
 
 
 class PromptCreate(BaseModel):
@@ -326,6 +333,14 @@ class RecommendationProcessOut(BaseModel):
 
 class ClusterEvidenceOut(BaseModel):
     cluster: str
+    opportunity_key: str = ""
+    product_area: str = ""
+    application: str = ""
+    buyer_intent: str = ""
+    substitute_theme: str = ""
+    taxonomy_version: str = ""
+    taxonomy_confidence: int = 0
+    source_clusters: List[str] = []
     prompt_count: int
     run_count: int
     good_count: int
@@ -350,8 +365,10 @@ class ClusterEvidenceOut(BaseModel):
     linked_prompt_texts: List[str] = []
     prompts_to_rerun: List[str] = []
     evidence_quality: int = 0
+    evidence_strength: str = "emerging"
     page_match_score: int = 0
     target_page_confidence: int = 0
+    target_page_confidence_label: str = "none"
     filtered_out_evidence_count: int = 0
     filtered_out_evidence: List[dict] = []
     success_metric: str = ""

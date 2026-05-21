@@ -27,6 +27,7 @@ def list_recommendations(
     related_prompt_id: Optional[str] = None,
     related_url: Optional[str] = None,
     related_source_id: Optional[str] = None,
+    include_history: bool = False,
 ):
     q = db.query(models.Recommendation)
     if status:
@@ -42,11 +43,11 @@ def list_recommendations(
     rows = q.order_by(models.Recommendation.priority_score.desc()).all()
     active = []
     for row in rows:
-        if row.status in ("Rejected", "Stale") and not status:
+        if row.status in ("Rejected", "Stale") and not status and not include_history:
             continue
         if row.related_prompt_id:
             prompt = db.query(models.Prompt).filter_by(prompt_id=row.related_prompt_id).one_or_none()
-            if prompt and prompt.monitor_status == "Good" and not status and (row.score_breakdown or {}).get("source") != "cluster_evidence":
+            if prompt and prompt.monitor_status == "Good" and not status and not include_history and (row.score_breakdown or {}).get("source") != "cluster_evidence":
                 continue
         active.append(row)
     return active

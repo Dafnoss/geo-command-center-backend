@@ -332,6 +332,7 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
         if (e["gap_count"] + e["risk_count"]) > 0
         and e.get("failure_modes")
         and e.get("evidence_quality", 0) >= 40
+        and _passes_minimum_recommendation_evidence(e)
     ]
     selected_evidence = _select_strategic_opportunities(weak_evidence, limit=7)
 
@@ -469,7 +470,7 @@ def _select_strategic_opportunities(items: list[dict], limit: int = 7) -> list[d
         and (item["gap_count"] + item["risk_count"]) > 0
         and item.get("evidence_quality", 0) >= 40
     ]
-    candidates = high_quality or ranked[:3]
+    candidates = high_quality or [item for item in ranked if _passes_minimum_recommendation_evidence(item)][:3]
     selected: list[dict] = []
     type_counts: dict[str, int] = defaultdict(int)
     for item in candidates:
@@ -481,6 +482,19 @@ def _select_strategic_opportunities(items: list[dict], limit: int = 7) -> list[d
         if len(selected) >= limit:
             break
     return selected or candidates[:min(3, limit)]
+
+
+def _passes_minimum_recommendation_evidence(item: dict) -> bool:
+    run_count = item.get("run_count", 0)
+    components = item.get("priority_components") or {}
+    if run_count >= 2:
+        return True
+    if run_count != 1 or item.get("evidence_quality", 0) < 40 or components.get("business_priority", 0) < 80:
+        return False
+    strong_existing_page = components.get("existing_page_leverage", 0) >= 55 and item.get("target_page_confidence", 0) >= 60
+    strong_demand = components.get("search_demand", 0) >= 35
+    strong_pressure = components.get("competitor_pressure", 0) >= 70 or "Substitute Dominated" in (item.get("failure_modes") or [])
+    return strong_existing_page or strong_demand or strong_pressure
 
 
 def _max_active_per_type(typ: str) -> int:
@@ -803,8 +817,12 @@ def _recommendation_meta(item: dict) -> dict:
         "business_priority": components["business_priority"],
         "confidence": components["confidence"],
         "evidence_quality": item.get("evidence_quality", 0),
+        "evidence_strength": item.get("evidence_strength", "emerging"),
         "page_match_score": item.get("page_match_score", 0),
         "target_page_confidence": item.get("target_page_confidence", 0),
+        "target_page_confidence_label": item.get("target_page_confidence_label", "none"),
+        "taxonomy_version": item.get("taxonomy_version", ""),
+        "taxonomy_confidence": item.get("taxonomy_confidence", 0),
         "filtered_out_evidence_count": item.get("filtered_out_evidence_count", 0),
         "filtered_out_evidence": item.get("filtered_out_evidence", []),
         "success_metric": item.get("success_metric", ""),

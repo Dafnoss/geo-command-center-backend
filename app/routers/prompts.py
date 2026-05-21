@@ -15,6 +15,7 @@ from app.scoring import (
     ai_visibility_score,
     competitor_pressure_score,
 )
+from app.taxonomy import apply_prompt_taxonomy
 
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
@@ -91,6 +92,7 @@ def create_prompt(data: schemas.PromptCreate, db: Session = Depends(get_db)):
         target_url=data.target_url,
         priority=_priority_label_from_business(data.business_priority),
     )
+    apply_prompt_taxonomy(row, force=True)
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -106,6 +108,8 @@ def update_prompt(prompt_id: str, data: schemas.PromptUpdate, db: Session = Depe
         setattr(row, k, v)
     if data.business_priority is not None:
         row.priority = _priority_label_from_business(data.business_priority)
+    if data.prompt_text is not None or data.topic_cluster is not None:
+        apply_prompt_taxonomy(row, force=True)
     db.commit()
     db.refresh(row)
     return row

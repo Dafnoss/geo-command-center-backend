@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlparse
 from sqlalchemy.orm import Session
 
 from app import models
+from app.taxonomy import classify_prompt_taxonomy, prompt_taxonomy
 from app.visibility import DEFAULT_OWNED_DOMAINS, domain_matches_owned, domain_of, is_run_prompt, is_visible_prompt, split_csv
 
 
@@ -410,7 +411,7 @@ def _page_leverage_score(best_page: dict | None) -> int:
 def _evidence_quality_score(total: int, gsc_rows: list, ga4_rows: list, filtered_count: int) -> int:
     metric_scores = [getattr(r, "_match_score", MIN_RELEVANT_EVIDENCE_SCORE) for r in (gsc_rows + ga4_rows)]
     metric_quality = round(sum(metric_scores) / len(metric_scores)) if metric_scores else 0
-    prompt_quality = min(45, 30 + min(total, 8) * 3)
+    prompt_quality = min(48, 36 + min(total, 8) * 4)
     evidence_bonus = 0
     if gsc_rows:
         evidence_bonus += 10
@@ -436,48 +437,8 @@ def _contains_any(text: str, needles: Iterable[str]) -> bool:
 
 
 def classify_opportunity(text: str, cluster: str = "") -> dict:
-    hay = re.sub(r"\s+", " ", f"{text or ''} {cluster or ''}".lower())
-    product_area = _first_pattern(hay, PRODUCT_PATTERNS) or "Conductive / anti-static additives"
-    application = _first_pattern(hay, APPLICATION_PATTERNS) or "general industrial materials"
-    buyer_intent = _first_pattern(hay, INTENT_PATTERNS) or "category education"
-    substitute_theme = _first_pattern(hay, SUBSTITUTE_PATTERNS) or ""
-
-    if substitute_theme and buyer_intent == "category education":
-        buyer_intent = "substitute/alternative"
-    if any(term in hay for term in ("best", "which", "what additive", "how to make")) and buyer_intent == "category education":
-        buyer_intent = "application/use-case"
-
-    label_parts = []
-    if application != "general industrial materials":
-        label_parts.append(_human_label(application))
-    label_parts.append(_human_label(product_area))
-    if buyer_intent not in ("category education", "application/use-case"):
-        label_parts.append(_human_label(buyer_intent))
-    if substitute_theme:
-        label_parts.append("vs " + _human_label(substitute_theme))
-
-    label = " / ".join(dict.fromkeys(label_parts))[:96] or _human_label(cluster or "GEO opportunity")
-    key = _slug("|".join([
-        product_area,
-        application,
-        buyer_intent,
-        substitute_theme,
-    ]))
-    return {
-        "opportunity_key": key,
-        "opportunity_label": label,
-        "product_area": product_area,
-        "application": application,
-        "buyer_intent": buyer_intent,
-        "substitute_theme": substitute_theme,
-    }
-
-
-def _first_pattern(text: str, patterns: Iterable[tuple[str, Iterable[str]]]) -> str:
-    for label, needles in patterns:
-        if _contains_any(text, needles):
-            return label
-    return ""
+    """Backward-compatible wrapper around the persisted prompt taxonomy."""
+    return classify_prompt_taxonomy(text, cluster)
 
 
 def _slug(value: str) -> str:
@@ -616,7 +577,8 @@ def build_cluster_evidence(db: Session) -> list[dict]:
     run_prompts = [p for p in prompts if is_run_prompt(p)]
     by_cluster: dict[str, list[models.Prompt]] = defaultdict(list)
     for prompt in run_prompts:
-        by_cluster[prompt.topic_cluster or "Uncategorized"].append(prompt)
+        taxonomy = prompt_taxonomy(prompt)
+        by_cluster[taxonomy.get("display_label") or prompt.topic_cluster or "Uncategorized"].append(prompt)
 
     gsc_all = db.query(models.GoogleSearchMetric).all()
     ga4_all = db.query(models.GoogleAnalyticsMetric).all()
@@ -625,7 +587,7 @@ def build_cluster_evidence(db: Session) -> list[dict]:
 
     for cluster, plist in by_cluster.items():
         terms, specific_terms = _prompt_terms(plist)
-        classifier = classify_opportunity(" ".join(p.prompt_text for p in plist[:12]), cluster)
+        classifier = prompt_taxonomy(plist[0]) if plist else classify_opportunity("", cluster)
         terms |= _norm_words(" ".join([
             classifier.get("product_area", ""),
             classifier.get("application", ""),
@@ -681,6 +643,9 @@ def build_cluster_evidence(db: Session) -> list[dict]:
         evidence = {
             "cluster": cluster,
             "opportunity_key": classifier["opportunity_key"],
+            "taxonomy_version": classifier.get("taxonomy_version", ""),
+            "taxonomy_confidence": classifier.get("taxonomy_confidence", 0),
+            "source_clusters": list(dict.fromkeys(p.topic_cluster for p in plist if p.topic_cluster)),
             "product_area": classifier["product_area"],
             "application": classifier["application"],
             "buyer_intent": classifier["buyer_intent"],
@@ -715,8 +680,10 @@ def build_cluster_evidence(db: Session) -> list[dict]:
             "linked_prompt_texts": [p.prompt_text for p in plist[:8]],
             "prompts_to_rerun": [p.prompt_id for p in plist if p.monitor_status in ("Gap", "Risk")][:12],
             "evidence_quality": evidence_quality,
+            "evidence_strength": _evidence_strength(evidence_quality, total),
             "page_match_score": best_page.get("page_match_score") if best_page else 0,
             "target_page_confidence": best_page.get("target_page_confidence") if best_page else 0,
+            "target_page_confidence_label": _target_confidence_label(best_page),
             "filtered_out_evidence_count": filtered_out_count,
             "filtered_out_evidence": (filtered_gsc + filtered_ga4)[:10],
             "priority_components": weights.__dict__ | {"priority_score": weights.priority_score},
@@ -740,7 +707,7 @@ def build_opportunity_evidence(db: Session) -> list[dict]:
     run_prompts = [p for p in prompts if is_run_prompt(p)]
     groups: dict[str, dict] = {}
     for prompt in run_prompts:
-        classifier = classify_opportunity(prompt.prompt_text, prompt.topic_cluster)
+        classifier = prompt_taxonomy(prompt)
         key = classifier["opportunity_key"]
         row = groups.setdefault(key, {
             **classifier,
@@ -817,6 +784,8 @@ def build_opportunity_evidence(db: Session) -> list[dict]:
         evidence = {
             "cluster": label,
             "opportunity_key": key,
+            "taxonomy_version": group.get("taxonomy_version", ""),
+            "taxonomy_confidence": group.get("taxonomy_confidence", 0),
             "product_area": group.get("product_area"),
             "application": group.get("application"),
             "buyer_intent": group.get("buyer_intent"),
@@ -852,8 +821,10 @@ def build_opportunity_evidence(db: Session) -> list[dict]:
             "linked_prompt_texts": [p.prompt_text for p in plist],
             "prompts_to_rerun": [p.prompt_id for p in plist if p.monitor_status in ("Gap", "Risk")][:12],
             "evidence_quality": evidence_quality,
+            "evidence_strength": _evidence_strength(evidence_quality, total),
             "page_match_score": best_page.get("page_match_score") if best_page else 0,
             "target_page_confidence": best_page.get("target_page_confidence") if best_page else 0,
+            "target_page_confidence_label": _target_confidence_label(best_page),
             "filtered_out_evidence_count": filtered_out_count,
             "filtered_out_evidence": (filtered_gsc + filtered_ga4)[:10],
             "priority_components": weights.__dict__ | {"priority_score": weights.priority_score},
@@ -872,3 +843,22 @@ def get_cluster_evidence(db: Session, cluster: str) -> dict | None:
         if item["cluster"] == cluster:
             return item
     return None
+
+
+def _evidence_strength(score: int, run_count: int) -> str:
+    if score >= 70 and run_count >= 3:
+        return "strong"
+    if score >= 50 and run_count >= 2:
+        return "moderate"
+    return "emerging"
+
+
+def _target_confidence_label(page: dict | None) -> str:
+    if not page:
+        return "none"
+    score = int(page.get("target_page_confidence") or page.get("page_match_score") or 0)
+    if score >= 75:
+        return "strong"
+    if score >= MIN_TARGET_PAGE_SCORE:
+        return "possible"
+    return "none"
