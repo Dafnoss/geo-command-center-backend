@@ -332,7 +332,6 @@ def process_prompt_evidence_recommendations(db: Session) -> dict:
         if (e["gap_count"] + e["risk_count"]) > 0
         and e.get("failure_modes")
         and e.get("evidence_quality", 0) >= 40
-        and _passes_minimum_recommendation_evidence(e)
     ]
     selected_evidence = _select_strategic_opportunities(weak_evidence, limit=7)
 
@@ -464,13 +463,14 @@ def _select_strategic_opportunities(items: list[dict], limit: int = 7) -> list[d
         key=lambda e: e["priority_components"]["priority_score"],
         reverse=True,
     )
+    eligible = [item for item in ranked if _passes_minimum_recommendation_evidence(item)]
     high_quality = [
-        item for item in ranked
+        item for item in eligible
         if item["priority_components"]["priority_score"] >= 55
         and (item["gap_count"] + item["risk_count"]) > 0
         and item.get("evidence_quality", 0) >= 40
     ]
-    candidates = high_quality or [item for item in ranked if _passes_minimum_recommendation_evidence(item)][:3]
+    candidates = high_quality or eligible[:3]
     selected: list[dict] = []
     type_counts: dict[str, int] = defaultdict(int)
     for item in candidates:
