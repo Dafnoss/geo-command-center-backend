@@ -489,12 +489,15 @@ def _passes_minimum_recommendation_evidence(item: dict) -> bool:
     components = item.get("priority_components") or {}
     if run_count >= 2:
         return True
-    if run_count != 1 or item.get("evidence_quality", 0) < 40 or components.get("business_priority", 0) < 80:
+    if run_count != 1 or item.get("evidence_quality", 0) < 60 or components.get("business_priority", 0) < 80:
         return False
-    strong_existing_page = components.get("existing_page_leverage", 0) >= 55 and item.get("target_page_confidence", 0) >= 60
-    strong_demand = components.get("search_demand", 0) >= 35
-    strong_pressure = components.get("competitor_pressure", 0) >= 70 or "Substitute Dominated" in (item.get("failure_modes") or [])
-    return strong_existing_page or strong_demand or strong_pressure
+    strong_existing_page = (
+        components.get("existing_page_leverage", 0) >= 70
+        and item.get("target_page_confidence", 0) >= 75
+        and components.get("search_demand", 0) >= 25
+    )
+    strong_demand = components.get("search_demand", 0) >= 70
+    return strong_existing_page or strong_demand
 
 
 def _max_active_per_type(typ: str) -> int:

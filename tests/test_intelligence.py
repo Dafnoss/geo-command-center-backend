@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app import intelligence  # noqa: E402
 from app import models  # noqa: E402
 from app import prompt_research  # noqa: E402
+from app import recommender  # noqa: E402
 from app import source_utils  # noqa: E402
 from app.routers import integrations  # noqa: E402
 from app.traffic import classify_ai_source  # noqa: E402
@@ -68,6 +69,20 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(derive_monitor_status(visible=False, competitors=["Cabot"], domain_cited=True), "Good")
         self.assertEqual(derive_monitor_status(visible=False, competitors=["Cabot"]), "Risk")
         self.assertEqual(derive_monitor_status(visible=False, competitors=[]), "Gap")
+
+    def test_single_prompt_competitor_pressure_is_not_strategic_evidence(self):
+        self.assertFalse(recommender._passes_minimum_recommendation_evidence({
+            "run_count": 1,
+            "evidence_quality": 64,
+            "target_page_confidence": 65,
+            "failure_modes": ["Competitor Dominated"],
+            "priority_components": {
+                "business_priority": 80,
+                "competitor_pressure": 100,
+                "existing_page_leverage": 55,
+                "search_demand": 3,
+            },
+        }))
 
     def test_sources_merge_by_domain_and_repoint_references(self):
         suffix = uuid.uuid4().hex[:8]
@@ -616,7 +631,7 @@ class IntelligenceTests(unittest.TestCase):
         for prompt_id, text in [
             (unchecked_id, "Unchecked processor prompt"),
             (risk_id, "Conductive additive suppliers for plastics"),
-            (gap_id, "Best antistatic additive for elastomers"),
+            (gap_id, "Which conductive additive suppliers are best for plastics?"),
         ]:
             res = self.client.post("/prompts", json={
                 "prompt_id": prompt_id,
@@ -724,18 +739,21 @@ class IntelligenceTests(unittest.TestCase):
     def test_recommendation_type_upgrade_existing_page_with_gsc_ga4_leverage(self):
         suffix = uuid.uuid4().hex[:8]
         cluster = f"Leverage {suffix}"
-        prompt_id = f"PLEV-{suffix}"
-        self.client.post("/prompts", json={
-            "prompt_id": prompt_id,
-            "prompt_text": "conductive additive for polymer compounds",
-            "topic_cluster": cluster,
-            "business_priority": 5,
-        })
-        self.client.post("/ai-results", json={
-            "prompt_id": prompt_id,
-            "answer_text": "Several suppliers exist but the answer does not name the target brand.",
-            "answer_quality_score": 3,
-        })
+        for prompt_id, prompt_text in [
+            (f"PLEV-A-{suffix}", "conductive additive for polymer compounds"),
+            (f"PLEV-B-{suffix}", "best conductive additive for polymer compounds"),
+        ]:
+            self.client.post("/prompts", json={
+                "prompt_id": prompt_id,
+                "prompt_text": prompt_text,
+                "topic_cluster": cluster,
+                "business_priority": 5,
+            })
+            self.client.post("/ai-results", json={
+                "prompt_id": prompt_id,
+                "answer_text": "Several suppliers exist but the answer does not name the target brand.",
+                "answer_quality_score": 3,
+            })
         db = SessionLocal()
         try:
             db.add(models.GoogleSearchMetric(
@@ -927,19 +945,22 @@ class IntelligenceTests(unittest.TestCase):
 
     def test_recommendation_done_stores_lifecycle_metadata(self):
         suffix = uuid.uuid4().hex[:8]
-        prompt_id = f"PDONE-{suffix}"
-        self.client.post("/prompts", json={
-            "prompt_id": prompt_id,
-            "prompt_text": "best antistatic additive compared with carbon black",
-            "topic_cluster": f"Done {suffix}",
-            "business_priority": 5,
-        })
-        self.client.post("/ai-results", json={
-            "prompt_id": prompt_id,
-            "answer_text": "Cabot carbon black is commonly recommended; the target brand is absent.",
-            "competitors_mentioned": ["Cabot"],
-            "answer_quality_score": 3,
-        })
+        for prompt_id, prompt_text in [
+            (f"PDONE-A-{suffix}", "best antistatic additive compared with carbon black for plastics"),
+            (f"PDONE-B-{suffix}", "compare carbon black and antistatic additives for plastics"),
+        ]:
+            self.client.post("/prompts", json={
+                "prompt_id": prompt_id,
+                "prompt_text": prompt_text,
+                "topic_cluster": f"Done {suffix}",
+                "business_priority": 5,
+            })
+            self.client.post("/ai-results", json={
+                "prompt_id": prompt_id,
+                "answer_text": "Cabot carbon black is commonly recommended; the target brand is absent.",
+                "competitors_mentioned": ["Cabot"],
+                "answer_quality_score": 3,
+            })
         data = self.client.post("/recommendations/process-prompts").json()
         rec = data["recommendations"][0]
         done = self.client.patch(f"/recommendations/{rec['recommendation_id']}/status", json={
