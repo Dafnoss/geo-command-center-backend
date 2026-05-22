@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, extract
 
 from app import models
+from app.config import settings as app_settings
 from app.database import get_db
 from app import monitor as monitor_engine
 from app.visibility import derive_monitor_status
@@ -135,5 +136,5 @@ def status(db: Session = Depends(get_db)):
         "month_to_date_cost_usd": float(month_total or 0.0),
         "runs_this_month": int(runs_this_month or 0),
         "last_run_at": _setting(db, "last_run_at", ""),
-        "openai_model": _setting(db, "openai_model", "gpt-4o-mini"),
+        "openai_model": _setting(db, "openai_model", app_settings.openai_model),
     }
